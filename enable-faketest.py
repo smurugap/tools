@@ -69,17 +69,23 @@ def get_python_path():
         pythonpath = '/usr/lib/python2.7/dist-packages'
     return pythonpath
 
-def fixup_nova_compute(faketestdriver):
+def fixup_nova_compute(faketestdriver, reset=False):
     pythonpath = get_python_path()
-    put(faketestdriver, "%s/nova/virt/fakeTest.py"%(pythonpath), use_sudo=True)
-    sudo("sed -i -e 's/connection_type.*$/connection_type=fakeTest/g' \
-                                               /etc/nova/nova.conf") #add this in compute
-    sudo("sed -i -e 's/connection_type.*$/connection_type=fakeTest/g' \
-                                       /etc/nova/nova-compute.conf") #add this in compute
-    sudo("sed -i -e 's/compute_driver.*$/compute_driver=fakeTest.FakeTestDriver/g'\
-                                               /etc/nova/nova.conf") #add this in compute
-    sudo("sed -i -e 's/compute_driver.*$/compute_driver=fakeTest.FakeTestDriver/g'\
-                                       /etc/nova/nova-compute.conf") #add this in compute
+    if not reset:
+        put(faketestdriver, "%s/nova/virt/fakeTest.py"%(pythonpath), use_sudo=True)
+        compute_driver = "fakeTest.FakeTestDriver"
+        connection_type = "fakeTest"
+    else:
+        compute_driver = "libvirt.LibvirtDriver"
+        connection_type = "libvirt"
+    sudo("sed -i -e 's/connection_type.*$/connection_type=%s/g' \
+                              /etc/nova/nova.conf"%(connection_type))
+    sudo("sed -i -e 's/connection_type.*$/connection_type=%s/g' \
+                              /etc/nova/nova-compute.conf"%(connection_type))
+    sudo("sed -i -e 's/compute_driver.*$/compute_driver=%s/g'\
+                              /etc/nova/nova.conf"%(compute_driver))
+    sudo("sed -i -e 's/compute_driver.*$/compute_driver=%s/g'\
+                              /etc/nova/nova-compute.conf"%(compute_driver))
     sudo("service nova-compute restart", pty=False)
 
 def fixup_nova_scheduler():
@@ -94,7 +100,7 @@ def fixup_nova(args, faketestdriver):
     for compute in args.computes:
         with settings(host_string='%s@%s'%(args.username, compute),
                       password=args.password, warn_only=True):
-            fixup_nova_compute(faketestdriver)
+            fixup_nova_compute(faketestdriver, args.reset)
     for openstack in args.controllers:
         with settings(host_string='%s@%s'%(args.username, openstack), 
                       password=args.password, warn_only=True):
@@ -128,6 +134,9 @@ def parse_cli(args):
                         default=[],
                         nargs='+',
                         help='Space separated list of compute nodes')
+    parser.add_argument('--reset',
+                        action='store_true',
+                        help='Reset to Libvirt')
     pargs = parser.parse_args(args)
     return pargs
 
