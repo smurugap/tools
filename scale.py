@@ -1,3 +1,4 @@
+from servicechain import ServiceChain
 import argparse
 import random
 import socket
@@ -5,6 +6,8 @@ import struct
 import os
 import sys
 import time
+import uuid
+import copy
 import signal
 import string
 import MySQLdb
@@ -13,16 +16,36 @@ from netaddr import *
 from datetime import datetime
 from multiprocessing import Process, Queue
 from neutronclient.neutron import client as neutron_client
+from novaclient import client as nova_client
+from keystoneclient.v2_0 import client as ks_client
 try:
     from vnc_api.vnc_api import *
 except:
     pass
+from copy_reg import pickle
+from types import MethodType
 
-from novaclient import client as nova_client
-from keystoneclient.v2_0 import client as ks_client
+def _pickle_method(method):
+    func_name = method.im_func.__name__
+    obj = method.im_self
+    cls = method.im_class
+    return _unpickle_method, (func_name, obj, cls)
+
+def _unpickle_method(func_name, obj, cls):
+    for cls in cls.mro():
+        try:
+            func = cls.__dict__[func_name]
+        except KeyError:
+            pass
+        else:
+            break
+    return func.__get__(obj, cls)
+
+pickle(MethodType, _pickle_method, _unpickle_method)
 
 alloc_addr_list = list()
-debug = False
+debug = True
+max_inst = 20
 
 def retry(tries=12, delay=5):
     def deco_retry(f):
@@ -66,7 +89,10 @@ class ScaleTest(object):
                                          self._args.admin_tenant)
         self.obj = self._args.admin_obj
         self.userid = self.obj.get_user_id(self._args.username)
-        self.roleid = self.obj.get_role_id('Member')
+        role = 'Member'
+        if self._args.vnc or self._args.n_svc_chains or self._args.n_svc_templates:
+            role = 'admin'
+        self.roleid = self.obj.get_role_id(role)
         if self._args.tenant:
             self.tenant_id = Openstack(self._args.auth_url,
                                        self._args.username,
@@ -76,7 +102,7 @@ class ScaleTest(object):
         self._args.timeout = 60 if self._args.rate \
                                 else self._args.timeout
         self.db = None
-        if self._args.n_vms:
+        if self._args.n_vms or self._args.n_svc_chains:
             self.db = DB(user='root', password=self._args.mysql_passwd,
                          host=self._args.keystone_ip, database='nova')
             self.initial_vm_count = self.get_active_vm_count()
@@ -96,7 +122,9 @@ class ScaleTest(object):
     def is_per_tenant_obj_reqd(self):
         if self._args.n_vns or self._args.n_vms or self._args.n_sgs or \
            self._args.n_sg_rules or self._args.n_routers or \
-           self._args.n_fips or self._args.n_ports:
+           self._args.n_fips or self._args.n_ports or \
+           self._args.n_svc_templates or self._args.n_svc_chains or \
+           self._args.n_policies or self._args.n_policy_rules:
             return True
         return False
 
@@ -144,7 +172,7 @@ class ScaleTest(object):
         # Verify the created objects
         if self._args.verify:
             (success, timediff) = create_n_process(self.verify,
-                                                   self._args.n_process,
+                                                   len(self.tenants_list),
                                                    kwargs_list)
             print 'Time to verify all tenants', timediff, 'Success Percentage:', success
 
@@ -170,6 +198,7 @@ class ScaleTest(object):
                 tenant_dict['id'] = self.tenant_id
                 # Check if any objs has to be created per Tenant
                 if self.is_per_tenant_obj_reqd():
+                    self._args.auth_token = self.obj.get_auth_token()
                     pertenantobj = PerTenantWrapper(self._args)
                     pertenantobj.setUp()
                     tenant_dict['pertenantobj'] = pertenantobj
@@ -181,13 +210,15 @@ class ScaleTest(object):
 
     def post_create(self):
         # Check VM active count
-        if self._args.n_vms:
+        if self._args.n_vms or self._args.n_svc_chains:
             expected = self._args.n_process * self._args.n_tenants *\
-                       self._args.n_threads * self._args.n_vms
+                       self._args.n_threads * ((self._args.n_vns or 1) * self._args.n_vms * max_inst + self._args.n_svc_chains)
+            exp_ports = self._args.n_process * self._args.n_tenants *\
+                       self._args.n_threads * ((self._args.n_vns or 1) * self._args.n_vms * max_inst + self._args.n_svc_chains*2)
             print "Took %s secs to have all vms in active state" %(
                    self.get_vm_active_time(self.initial_vm_count, expected))
             current_port_count = self.get_port_count()
-            if current_port_count - self.initial_port_count != expected:
+            if current_port_count - self.initial_port_count != exp_ports:
                 print 'Port count mismatch, current:%s, expected:%s'%(
                        current_port_count-self.initial_port_count, expected)
             for tenants in self.tenants_list:
@@ -207,7 +238,7 @@ class ScaleTest(object):
         for tenants in self.tenants_list:
             kwargs_list.append({'tenants': tenants})
         (success, timediff) = create_n_process(self.delete, 
-                                               self._args.n_process,
+                                               len(self.tenants_list),
                                                kwargs_list,
                                                self._args.timeout)
         print 'Time to delete all tenants', timediff
@@ -216,8 +247,8 @@ class ScaleTest(object):
         for tenant_dict in tenants:
             if tenant_dict.has_key('pertenantobj'):
                 tenant_dict['pertenantobj'].cleanup()
-            if not self._args.tenant:
-                self.obj.delete_tenant(tenant_dict['id'])
+#            if not self._args.tenant:
+#                self.obj.delete_tenant(tenant_dict['id'])
 
 class PerTenantWrapper(object):
     def __init__(self, args):
@@ -232,27 +263,56 @@ class PerTenantWrapper(object):
                            self._args.password,
                            self._args.tenant,
                            self._args.api_server_ip,
-                           self._args.api_server_port)
+                           self._args.api_server_port,
+                           self._args.keystone_ip,
+                           self._args.auth_token)
         else:
             self.obj = Openstack(self._args.auth_url,
                                  self._args.username,
                                  self._args.password,
-                                 self._args.tenant)
+                                 self._args.tenant,
+                                 self._args.auth_token)
+        if self._args.n_svc_templates or self._args.n_svc_chains or self._args.n_policies:
+            self.sc = ServiceChain(self.obj, self._args.username,
+                                   self._args.password,
+                                   self._args.tenant,
+                                   self._args.api_server_ip,
+                                   self._args.api_server_port,
+                                   self._args.keystone_ip,
+                                   self._args.auth_token)
 
     def pre_conf(self):
         ''' Create certain objects before staring test '''
         if (self._args.n_ports or self._args.n_vms)\
             and not self._args.n_vns:
-            vn_name = random_string('VN')
+            vn_name = self.get_name('VN', 'G')
             self.obj.create_network(vn_name, mask=16)
 
         if self._args.n_sg_rules and not self._args.n_sgs:
-           sg_name = random_string('SG')
+           sg_name = self.get_name('SG', 'G')
            self.obj.create_sg(sg_name)
 
-        if self._args.n_fips:
-            vn_name = random_string('EXT-VN')
-            self.admin_obj.create_network(vn_name, mask=16, external=True)
+        if self._args.n_fips or self._args.n_routers:
+            if not self._args.public_vn_id:
+                vn_name = random_string('EXT-VN')
+                self.admin_obj.create_network(vn_name, mask=16, external=True)
+            else:
+                self.admin_obj.ext_vn_uuid = self._args.public_vn_id
+
+        if self._args.n_svc_chains:
+            st_name = random_string('ServiceT')
+            self.sc.create_svc_template(name=st_name,
+                                        image_id= self._args.image_id,
+                                        service_mode='in-network')
+
+        if self._args.n_policies or self._args.n_policy_rules:
+            left_vn = random_string('Left-VN')
+            right_vn = random_string('Right-VN')
+            self.obj.create_network(left_vn)
+            self.obj.create_network(right_vn)
+
+        if self._args.n_policy_rules and not self._args.n_policies:
+            self._args.n_policies = 1
 
     def setUp(self):
         ''' Create N objects '''
@@ -279,7 +339,17 @@ class PerTenantWrapper(object):
          except Empty:
              process.terminate()
 
+    def merge_to_self(self, parent):
+        for attr in parent.__dict__:
+            if type(parent.__dict__[attr]) is list:
+                self.__dict__[attr].extend(parent.__dict__[attr])
+            if type(parent.__dict__[attr]) is dict:
+                self.__dict__[attr].update(parent.__dict__[attr])
+
     def start_create(self, index, queue):
+        parent_id = self.obj.id
+        self.get_handles()
+        self.obj.id = copy.deepcopy(parent_id)
         try:
             # Create virtual network
             for vn_index in range(index, index+self._args.n_vns):
@@ -289,7 +359,7 @@ class PerTenantWrapper(object):
             # Create Ports
             for vn_name in self.obj.id.vn_uuid.keys():
                 for port_index in range(index, index+self._args.n_ports):
-                    port_name = self.get_name(vn_name+'-Port', port_index)
+                    port_name = vn_name+'-Port'+str(port_index)
                     self.obj.create_port(vn_name, port_name)
 
             # Create Security Group
@@ -308,6 +378,13 @@ class PerTenantWrapper(object):
             for rtr_index in range(index, index+self._args.n_routers):
                 router_name = self.get_name('RTR', rtr_index)
                 self.obj.create_router(router_name)
+                self.obj.add_gateway_router(router_name, self.admin_obj.ext_vn_uuid)
+
+            # Attach all the VNs to a LR
+            for vn_name in self.obj.id.vn_uuid.keys():
+                 if self.obj.id.router_id.keys():
+                    rtr_name = self.obj.id.router_id.keys()[0]
+                    self.obj.add_interface_router(rtr_name, vn_name)
 
             # Create Floating IP
             for fip_index in range(index, index+self._args.n_fips):
@@ -316,11 +393,39 @@ class PerTenantWrapper(object):
             # Create virtual machines
             for vn_name in self.obj.id.vn_uuid.keys():
                 for vm_index in range(index, index+self._args.n_vms):
-                    vm_name = self.get_name(vn_name+'-VM', vm_index)
-                    port_name = self.get_name(vn_name+'-Port', vm_index)
+                    vm_name = vn_name+'-VM'+random_string(str(vm_index))
+                    port_name = vn_name+'-Port'+str(vm_index)
                     self.obj.create_vm(image_id=self._args.image_id,
                                        vm_name=vm_name, port_name=port_name,
                                        vn_name=vn_name)
+
+            # Create Service Template
+            for st_index in range(index, index+self._args.n_svc_templates):
+                st_name = random_string('ServiceT')
+                self.sc.create_svc_template(name=st_name,
+                                            image_id= self._args.image_id,
+                                            service_mode='in-network')
+
+            for st_name in self.obj.id.st_obj.keys():
+                for si_index in range(index, index+self._args.n_svc_chains):
+                    si_name = self.get_name('ServiceI', si_index)
+                    pol_name = 'Policy-'+si_name
+                    left_vn = self.get_name('leftVN', si_index)
+                    right_vn = self.get_name('rightVN', si_index)
+                    self.obj.create_network(vn_name=left_vn)
+                    self.obj.create_network(vn_name=right_vn)
+                    self.sc.create_svc_instance(si_name, st_name, left_vn, right_vn)
+                    self.sc.create_policy(name=pol_name, si_name=si_name,
+                                          src_vn=left_vn, dst_vn=right_vn)
+
+            # Create Policies
+            for policy_index in range(index, index+self._args.n_policies):
+                policy_name = self.get_name('Policy', policy_index)
+                vn_list = self.obj.id.vn_uuid.keys()
+                self.sc.create_policy(name=policy_name,
+                                      src_vn=vn_list[0],
+                                      dst_vn=vn_list[1],
+                                      n_rules=self._args.n_policy_rules)
         except:
             queue.put_nowait(self.obj.id)
             raise
@@ -351,10 +456,6 @@ class PerTenantWrapper(object):
         if not id.vm_id:
             for port_id in id.port_id.values():
                 self.obj.delete_port(port_id)
-        # Delete VN
-        if not id.vm_id and not id.port_id:
-            for vn_id in id.vn_uuid.values():
-                self.obj.delete_network(vn_id)
         # Delete Security Group rule
         for rules in id.rule_id.values():
             for rule in rules:
@@ -364,7 +465,17 @@ class PerTenantWrapper(object):
             self.obj.delete_sg(sg_id)
         # Delete Router
         for router_id in id.router_id.values():
+            for subnet_id in id.subnet_uuid.values():
+                self.obj.remove_interface_router(router_id, subnet_id)
+            self.obj.remove_gateway_router(router_id)
             self.obj.delete_router(router_id)
+        # Delete VN
+        if not id.vm_id and not id.port_id:
+            for vn_id in id.vn_uuid.values():
+                self.obj.delete_network(vn_id)
+        # Delete Policies
+        for policy_id in id.policy_id.values():
+            self.obj.delete_policy(policy_id)
 
     def post_cleanup(self):
         ''' Cleanup the parent created objects '''
@@ -376,31 +487,44 @@ class PerTenantWrapper(object):
         vm_dict = dict()
         for vm_obj in vm_objs:
             vm_dict[vm_obj.name] = vm_obj
+        '''
+            vm_obj.delete()
+        print vm_dict.keys(), vm_dict.values()
+        '''
         for id in self.id_obj:
-            for vm_name in id.vm_id.keys():
-                id.vm_obj[vm_name] = vm_dict[vm_name]
+            for actual_name in vm_dict.keys():
+                for vm_name in id.vm_id.keys():
+                    if vm_name in actual_name:
+                        id.vm_obj[actual_name] = vm_dict[actual_name]
 
     def verify(self, op=None):
         pass
 
     def get_name(self, prefix, index):
-        return self._args.tenant + str(prefix) + str(index)
+        return random_string(self._args.tenant + '-' + str(prefix) + str(index))
 
 # A Class of UUIDs
 class UUID(object):
     def __init__(self):
-        self.vn_obj = dict()
         self.vn_uuid = dict()
+        self.subnet_uuid = dict()
         self.port_id = dict()
         self.sg_id = dict()
         self.rule_id = dict()
         self.router_id = dict()
+        self.policy_id = dict()
         self.fip_id = list()
         self.vm_id = dict()
+        self.vn_obj = dict()
+        self.sg_obj = dict()
+        self.fip_pool_obj = None
         self.vm_obj = dict()
+        self.st_obj = dict()
+        self.si_obj = dict()
+        self.policy_obj = dict()
 
 class Openstack(object):
-    def __init__(self, auth_url, username, password, tenant):
+    def __init__(self, auth_url, username, password, tenant, auth_token=None):
         ''' Get keystone client obj '''
         self.keystone = ks_client.Client(username=username,
                                          password=password,
@@ -414,6 +538,7 @@ class Openstack(object):
                                        username=username,
                                        api_key=password,
                                        project_id=tenant,
+                                       auth_token=auth_token,
                                        insecure=True)
         ''' Get neutron client handle '''
         self.neutron = neutron_client.Client('2.0',
@@ -423,6 +548,9 @@ class Openstack(object):
                                              tenant_name=tenant,
                                              insecure=True)
         self.id = UUID()
+
+    def get_auth_token(self):
+        return self.keystone.auth_token
 
     def create_tenant(self, tenant_name):
         return self.keystone.tenants.create(tenant_name).id
@@ -463,11 +591,16 @@ class Openstack(object):
             self.ext_vn_uuid = net_id
         else:
             self.id.vn_uuid[vn_name] = net_id
-        self.neutron.create_subnet({'subnet':
+        response = self.neutron.create_subnet({'subnet':
                                     {'cidr': cidr,
                                      'ip_version': 4,
                                      'network_id': net_id
                                     }})
+        self.id.subnet_uuid[vn_name] = response['subnet']['id']
+
+    def update_network(self, vn_name, network_dict):
+        vn_id = self.id.vn_uuid[vn_name]
+        self.neutron.update_network(vn_id, {'network': network_dict})
 
     @retry(15, 2)
     def delete_network(self, vn_id):
@@ -505,6 +638,21 @@ class Openstack(object):
         router_dict = {'name': router_name, 'admin_state_up': True}
         response = self.neutron.create_router({'router': router_dict})
         self.id.router_id[router_name] = response['router']['id']
+
+    def add_interface_router(self, router_name, vn_name):
+        router_id = self.id.router_id[router_name]
+        subnet_id = self.id.subnet_uuid[vn_name]
+        self.neutron.add_interface_router(router_id, {'subnet_id': subnet_id})
+
+    def remove_interface_router(self, router_id, subnet_id):
+        self.neutron.remove_interface_router(router_id, {'subnet_id': subnet_id})
+
+    def add_gateway_router(self, router_name, vn_uuid):
+        router_id = self.id.router_id[router_name]
+        self.neutron.add_gateway_router(router_id, {'network_id': vn_uuid})
+
+    def remove_gateway_router(self, router_id):
+        self.neutron.remove_gateway_router(router_id)
 
     def delete_router(self, router_id):
         ''' Delete Logical Router '''
@@ -553,11 +701,20 @@ class Openstack(object):
         if compute_host:
             launch_on = zone + ':' + compute_host
 
+        '''
+        with open("/tmp/userdata.sh", "w") as f:
+            f.write("""#!/bin/sh
+ls -al / | tee /tmp/output.txt
+               """)
+        '''
         response = self.nova.servers.create(name=vm_name,
                                             flavor=flavor,
                                             image=image_id,
                                             nics=nics,
-                                            availability_zone=launch_on)
+                                            availability_zone=launch_on,
+                                            max_count=max_inst)
+#                                            userdata='/tmp/userdata.sh')
+#        print '%s, %s' %(response, response.__dict__)
         self.id.vm_id[vm_name] = response.id
 
     def list_vms(self, all_tenants=False):
@@ -567,25 +724,126 @@ class Openstack(object):
     def delete_vm(self, vm_obj):
         vm_obj.delete()
 
+    def delete_policy(self, policy_id):
+        self.neutron.delete_policy(policy_id)
+
 class VNC(Openstack):
-    def __init__(self, auth_url, username, password, tenant, ip, port):
-        super(VNC, self).__init__(auth_url, username, password, tenant)
+    def __init__(self, auth_url, username, password, tenant, ip, port, auth_host, auth_token=None):
+        super(VNC, self).__init__(auth_url, username, password, tenant, auth_token)
         self.vnc = VncApi(api_server_host=ip,
                           api_server_port=port,
                           username=username,
                           password=password,
-                          tenant_name=tenant)
+                          tenant_name=tenant,
+                          auth_host=auth_host,
+                          auth_token=auth_token)
+        self.project_obj = self.vnc.project_read(id=str(uuid.UUID(self.tenant_id)))
 
-    def create_network(self, vn_name, mask=24):
+    def create_network(self, vn_name, mask=24, external=False):
         ''' Create virtual network using VNC api '''
-        cidr = get_randmon_cidr(mask=mask)
-        self.id.vn_obj[vn_name] = VirtualNetwork(vn_name)
-        self.id.vn_obj[vn_name].add_network_ipam(NetworkIpam(),
-                             VnSubnetsType([IpamSubnetType(
-                             subnet=SubnetType(cidr, mask))]))
-        self.id.vn_uuid[vn_name] = self.vnc.virtual_network_create(self.id.vn_obj[vn_name])
-        print self.vnc.virtual_network_read(id = self.id.vn_uuid[vn_name])
-        print self.vnc.virtual_networks_list()
+        cidr = get_randmon_cidr(mask=mask).split('/')[0]
+        vn_obj = VirtualNetwork(vn_name, self.project_obj,
+                                router_external=external)
+        vn_obj.add_network_ipam(NetworkIpam(),
+                                VnSubnetsType([IpamSubnetType(
+                                subnet=SubnetType(cidr, mask))]))
+        net_id = self.vnc.virtual_network_create(vn_obj)
+        if external:
+            fip_pool_obj = FloatingIpPool(vn_name, vn_obj)
+            self.vnc.floating_ip_pool_create(fip_pool_obj)
+            self.project_obj.add_floating_ip_pool(fip_pool_obj)
+            self.vnc.project_update(self.project_obj)
+            self.id.fip_pool_obj = self.vnc.floating_ip_pool_read(fq_name=fip_pool_obj.get_fq_name())
+            self.ext_vn_uuid = net_id
+        else:
+            self.id.vn_uuid[vn_name] = net_id
+        self.id.vn_obj[vn_name] = self.vnc.virtual_network_read(fq_name=vn_obj.get_fq_name())
+
+    def create_port(self, vn_name, port_name):
+        ''' Create Port through VNC api '''
+        port_obj = VirtualMachineInterface(port_name, parent_obj=self.project_obj)
+        self.id.port_id[port_name] = port_obj.uuid = str(uuid.uuid4())
+        port_obj.add_virtual_network(self.id.vn_obj[vn_name])
+        self.vnc.virtual_machine_interface_create(port_obj)
+        iip_id = str(uuid.uuid4())
+        iip_obj = InstanceIp(name=iip_id)
+        iip_obj.uuid = iip_id
+        iip_obj.add_virtual_network(self.id.vn_obj[vn_name])
+        iip_obj.add_virtual_machine_interface(port_obj)
+        self.vnc.instance_ip_create(iip_obj)
+
+    def create_floatingip(self, ext_vn_uuid):
+        ''' Create Floating IP using VNC api '''
+        vn_obj = self.vnc.virtual_network_read(id=ext_vn_uuid)
+        fip_pool_obj = FloatingIpPool('floating-ip-pool', vn_obj)
+        fip_id = str(uuid.uuid4())
+        fip_obj = FloatingIp(name=fip_id, parent_obj=fip_pool_obj)
+        fip_obj.uuid = fip_id
+        fip_obj.set_project(self.project_obj)
+        fip_obj.set_virtual_machine_interface_list([])
+        fip_obj.set_floating_ip_fixed_ip_address(None)
+        self.vnc.floating_ip_create(fip_obj)
+        self.id.fip_id.append(fip_id)
+
+    def create_sg(self, sg_name):
+        ''' Create Security group using VNC api '''
+        def _get_rule(prefix, ethertype):
+            dst_addr = AddressType(subnet=SubnetType(prefix, 0))
+            src_addr = AddressType(security_group='local')
+            rule = PolicyRuleType(rule_uuid=str(uuid.uuid4()), direction='>',
+                                  protocol='any', src_addresses=[src_addr],
+                                  src_ports=[PortType(0, 65535)],
+                                  dst_addresses=[dst_addr],
+                                  dst_ports=[PortType(0, 65535)],
+                                  ethertype=ethertype)
+            return rule
+
+        rules = [_get_rule('0.0.0.0', 'IPv4'), _get_rule('::', 'IPv6')]
+        sg_obj = SecurityGroup(name=sg_name, parent_obj=self.project_obj,
+                               security_group_entries=PolicyEntriesType(rules))
+        self.id.sg_id[sg_name] = sg_obj.uuid = str(uuid.uuid4())
+        self.vnc.security_group_create(sg_obj)
+        self.id.sg_obj[sg_name] = self.vnc.security_group_read(id=sg_obj.uuid)
+
+    def create_sg_rule(self, sg_name, min, max, cidr='0.0.0.0/0',
+                       direction='ingress', proto='tcp'):
+        ''' Create Security Group Rule using VNC api '''
+        def _get_rule(dir, cidr, min, max, proto, ethertype):
+            prefix = cidr.split('/')
+            if dir == 'ingress':
+                src_addr = AddressType(subnet=SubnetType(prefix[0], int(prefix[1])))
+                dst_addr = AddressType(security_group='local')
+            else:
+                dst_addr = AddressType(subnet=SubnetType(prefix[0], int(prefix[1])))
+                src_addr = AddressType(security_group='local')
+            rule = PolicyRuleType(rule_uuid=str(uuid.uuid4()), direction='>',
+                                  protocol=proto, src_addresses=[src_addr],
+                                  src_ports=[PortType(0, 65535)],
+                                  dst_addresses=[dst_addr],
+                                  dst_ports=[PortType(min, max)],
+                                  ethertype=ethertype)
+            return rule
+
+        rule = _get_rule(direction, cidr, min, max, proto, 'IPv4')
+        sg_obj = self.id.sg_obj[sg_name]
+        rules = sg_obj.get_security_group_entries()
+        if rules is None:
+            rules = PolicyEntriesType([rule])
+        else:
+            rules.add_policy_rule(rule)
+        sg_obj.set_security_group_entries(rules)
+        self.vnc.security_group_update(sg_obj)
+        if sg_name not in self.id.rule_id:
+            self.id.rule_id[sg_name] = list()
+        self.id.rule_id[sg_name].append(rule.rule_uuid)
+        self.id.sg_obj[sg_name] = self.vnc.security_group_read(id=sg_obj.uuid)
+
+    def create_router(self, router_name):
+        ''' Create Logical Router using VNC api '''
+        router_obj = LogicalRouter(router_name, self.project_obj,
+                                   id_perms=IdPermsType(enable=True))
+        self.id.router_id[router_name] = router_obj.uuid = str(uuid.uuid4())
+        self.vnc.logical_router_create(router_obj)
 
 def get_randmon_cidr(mask=16):
     ''' Generate random non-overlapping cidr '''
@@ -595,9 +853,11 @@ def get_randmon_cidr(mask=16):
                                random.randint(2**24, 2**32 - 2**29 - 1)))
     address = str(IPNetwork(address+'/'+str(mask)).network)
     if address.startswith('169.254') or address in alloc_addr_list:
-        get_randmon_cidr()
-    alloc_addr_list.append(address)
-    return address+'/'+str(mask)
+        cidr = get_randmon_cidr()
+    else:
+        alloc_addr_list.append(address)
+        cidr = address+'/'+str(mask)
+    return cidr
 
 def parse_cli(args):
     '''Define and Parse arguments for the script'''
@@ -658,6 +918,10 @@ def parse_cli(args):
                         action='store',
                         default=None,
                         help='Image ID [None]')
+    parser.add_argument('--public_vn_id',
+                        action='store',
+                        default=None,
+                        help='UUID of public network')
     parser.add_argument('--n_vns',
                         action='store',
                         default='0', type=int,
@@ -681,11 +945,27 @@ def parse_cli(args):
     parser.add_argument('--n_vms',
                         action='store',
                         default='0', type=int,
-                        help='No of VMs to create per VN [0]')
+                        help='No of VMs to create per VN [0]. Each create spawns 20 vms by default')
     parser.add_argument('--n_fips',
                         action='store',
                         default='0', type=int,
                         help='No of Floating-IPs to create per tenant [0]')
+    parser.add_argument('--n_svc_chains',
+                        action='store',
+                        default='0', type=int,
+                        help='No of Service chains(instances+policy) to create per tenant [0]')
+    parser.add_argument('--n_svc_templates',
+                        action='store',
+                        default='0', type=int,
+                        help='No of Service templates to create per tenant [0]')
+    parser.add_argument('--n_policies',
+                        action='store',
+                        default='0', type=int,
+                        help='No of policies to create per tenant [0]')
+    parser.add_argument('--n_policy_rules',
+                        action='store',
+                        default='0', type=int,
+                        help='No of policy rules to create per policy [0]')
     parser.add_argument('--vnc',
                         action='store_true',
                         help='Use VNC client to configure objects [False]')
@@ -759,7 +1039,7 @@ def get_success_percentile(processes):
     return (success * 100)/len(processes)
 
 def random_string(prefix):
-    return prefix+''.join(random.choice(string.hexdigits) for _ in range(8))
+    return prefix+''.join(random.choice(string.hexdigits) for _ in range(4))
 
 def sig_handler(_signo, _stack_frame):
     raise KeyboardInterrupt
@@ -770,6 +1050,7 @@ def main():
     obj = ScaleTest(pargs)
     obj.setUp()
     if pargs.cleanup:
+        import pdb; pdb.set_trace()
         obj.cleanup()
 
 if __name__ == '__main__':
