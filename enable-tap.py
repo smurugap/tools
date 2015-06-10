@@ -18,11 +18,12 @@ def main():
     active_tap_list = set(list())
     while True:
         tap_list = get_tapinterfaces()
-        count = 0
+        count = 1
         for tap_intf in list(tap_list-active_tap_list):
             enable_tapinterface(tap_intf, dummy_dict)
             if not count % 100:
                 time.sleep(30)
+            count += 1
         active_tap_list = tap_list
         time.sleep(10)
 
