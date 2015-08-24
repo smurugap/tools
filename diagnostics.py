@@ -94,6 +94,10 @@ class openstack(orch):
             self.vm_obj[vm_id] = self.nova.servers.get(vm_id)
         return self.vm_obj[vm_id]
 
+    def get_vm_name(self, vm_id):
+        vm_obj = self.get_vm_obj(vm_id)
+        return vm_obj.name
+
     def get_host_of_vm(self, vm_id):
         vm_obj = self.get_vm_obj(vm_id)
         return host_name_map[vm_obj._info['OS-EXT-SRV-ATTR:hypervisor_hostname']]
@@ -505,7 +509,7 @@ class contrail(object):
         return True
 
     def verify_vdns(self, vm_id, destination):
-        destination = destination if destination else '$(hostname)'
+        destination = destination if destination else self.auth.get_vm_name(vm_id)
         return self.ping(vm_id, destination)
 
     def ping(self, vm_id, destination):
