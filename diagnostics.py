@@ -29,6 +29,12 @@ user_inputs = ('keystone_ip', 'orch_username', 'orch_password',
                'vm_id', 'vm_username', 'vm_password', 'destination')
 host_name_map = dict()
 
+class log(object):
+    def __init__(self, cls):
+        self.cls = cls
+    def logger(self, message):
+        print self.cls.__class__.__name__+':', message
+
 class orch(object):
     def __init__(self, args):
         super(orch, self).__init__()
@@ -37,6 +43,7 @@ class orch(object):
         self.hosts = dict()
         self.vm_obj = dict()
         self.vn_obj = dict()
+        self.log = log(self).logger
 
 class openstack(orch):
     def get_handle(self):
@@ -124,14 +131,18 @@ class openstack(orch):
 
     def verify_vm_is_up(self, vm_id):
         vm_obj = self.get_vm_obj(vm_id)
-        assert vm_obj._info['status'].lower() == 'active' or \
-               vm_obj._info['OS-EXT-STS:power_state'] == 1, "VM is not launched"
-        print "VM got launched"
+        if vm_obj._info['status'].lower() == 'active' and \
+           vm_obj._info['OS-EXT-STS:power_state'] == 1:
+            self.log("VM got launched")
+        else:
+            self.log("VM is not launched")
 
     def verify_ip_assigned(self, vm_id):
         vm_ips = self.get_vm_ips(vm_id)
-        assert vm_ips, 'VM hasnt been assigned an ip address'
-        print 'VM %s has been assigned %s'%(vm_id, str(vm_ips))
+        if vm_ips:
+            self.log('VM %s has been assigned %s'%(vm_id, str(vm_ips)))
+        else:
+            self.log('VM hasnt been assigned an ip address')
 
     def verify_vm(self, vm_id):
         self.verify_vm_is_up(vm_id)
@@ -160,6 +171,7 @@ class inspect(object):
         self.ip = ip
         self.port = int(port)
         self.drv = drv(**kwargs)
+        self.log = log(self).logger
 
     def _mk_url_str(self, path=''):
         if path.startswith('http:'):
@@ -259,8 +271,14 @@ class agent(inspect):
         return vmi[field] if field else vmi
 
     def verify_vmi_links(self, vmi_id, ri_name, address):
-        assert self.get_vmi(vmi_id, 'vrf_name') == ri_name
-        assert self.get_vmi(vmi_id, 'ip_addr') in address
+        if self.get_vmi(vmi_id, 'vrf_name') != ri_name:
+            self.log('VMI doesnt have link to vrf')
+        else:
+            self.log('VMI has vrf set')
+        if self.get_vmi(vmi_id, 'ip_addr') in address:
+            self.log('VMI has ip address set')
+        else:
+            self.log('VMI doesnt have ip address set')
 
     def fetch_routes(self, vrf, af='v4'):
         rt_dict = {'v4': 'uc.route.0', 'v6': 'uc.route6.0',
@@ -277,28 +295,34 @@ class agent(inspect):
             if route['src_ip'] == prefix and route['src_plen'] == str(plen):
                 return route['path_list']['list']
         else:
-            assert False, 'route not found'
+            self.log('Unable to find route with prefix %s and plen %s in vrf'%(prefix, str(plen)), vrf_name)
+            return []
 
     def verify_prefix(self, vrf_name, prefix, label, nh_type, nh_value):
         for path in self.get_matching_routes(vrf_name, prefix, plen=32, af='v4'):
             if path['label'] == label and path['nh']['NhSandeshData'][nh_type] == nh_value:
+                self.log('Route for prefix %s found with label %s'%(prefix, label))
                 return True
         else:
-            assert False, 'path doesnt match'
+            self.log('Route for prefix %s doesnt exist or has wrong index %s'%(prefix, label))
+            return False
 
     def verify_vm(self, vm_id, vmis):
         for vmi_id,vmi_obj in vmis.iteritems():
             ri = self.get('vn', vmi_obj['vn'][0]['uuid'])
-            assert ri and ri['vrf_name'] == ':'.join(vmi_obj['ri'][0]['to'])
+            if ri and ri['vrf_name'] == ':'.join(vmi_obj['ri'][0]['to']):
+                self.log('VN has link to RI')
+            else:
+                self.log('VN doesnt have link to RI')
             self.verify_vmi_links(vmi_id, ri['vrf_name'], vmi_obj['ip'])
             intf = self.get_vmi(vmi_id, 'name')
             label = self.get_vmi(vmi_id, 'label')
             for prefix in vmi_obj['ip']:
-                assert self.verify_prefix(ri['vrf_name'], prefix, label, nh_type='itf', nh_value=intf)
+                self.log('Verifying prefix %s with label %s and nh %s in vrf %s'%(prefix, label, intf, ri['vrf_name']))
+                self.verify_prefix(ri['vrf_name'], prefix, label, nh_type='itf', nh_value=intf)
 
 class control(inspect):
-    obj_path = {'rt': 'Snh_ShowRouteReq?x=',
-               }
+    obj_path = {'rt': 'Snh_ShowRouteReq?x='}
     xml_path = {'rt': './tables/list/ShowRouteTable'}
     def __init__(self, ip):
         port = 8083
@@ -331,20 +355,22 @@ class control(inspect):
             if route['prefix'] == prefix+'/'+str(plen):
                 return route['paths']['list']
         else:
-            assert False, 'route not found'
+            return []
 
     def verify_prefix(self, vrf_name, prefix, label, nh_type, nh_value):
         for path in self.get_matching_routes(vrf_name, prefix, plen=32, af='v4'):
             if path['label'] == label and path[nh_type] == nh_value:
                 return True
         else:
-            assert False, 'path doesnt match'
+            self.log('Route for prefix %s doesnt exist or has wrong index %s or nh'%(prefix, label))
+            return False
 
     def verify_vm(self, vm_id, vmis, agent):
         for vmi_id,vmi_obj in vmis.iteritems():
             vrf = ':'.join(vmi_obj['ri'][0]['to'])
             for prefix in vmi_obj['ip']:
-                assert self.verify_prefix(vrf, prefix, vmi_obj['label'], 'next_hop', agent)
+                self.log('Verifying prefix %s with label %s and nh %s in vrf %s'%(prefix, vmi_obj['label'], agent, vrf))
+                self.verify_prefix(vrf, prefix, vmi_obj['label'], 'next_hop', agent)
 
 class config(inspect):
     obj_path = {'vm': 'virtual-machine',
@@ -379,7 +405,10 @@ class config(inspect):
         vmis = self.get_vmis(vm_id)
         for vmi in vmis:
             assigned_ips.extend(self.get_ip_address(vmi['uuid']))
-        assert assigned_ips and (not expected_ips or set(expected_ips) == set(assigned_ips))
+        if assigned_ips and (not expected_ips or set(expected_ips) == set(assigned_ips)):
+            self.log('VM have IP address assigned')
+        else:
+            self.log('VM doesnt have expected IP address, expected %s, assigned %s' %(expected_ips, assigned_ips))
 
     def verify_ri_links(self, vm_id, expected_ris=[]):
         assigned_ris = list()
@@ -387,7 +416,10 @@ class config(inspect):
         for vmi in vmis:
             ris = [ri['uuid'] for ri in vmi['routing_instance_refs']]
             assigned_ris.extend([':'.join(self.get('ri', ri)['fq_name']) for ri in ris])
-        assert assigned_ris and (not expected_ris or set(expected_ris) == set(assigned_ris))
+        if assigned_ris and (not expected_ris or set(expected_ris) == set(assigned_ris)):
+            self.log('VMI have RI link')
+        else:
+            self.log('VMI doesnt have RI refs')
 
     def verify_vn_links(self, vm_id, expected_vns=[]):
         assigned_vns = list()
@@ -395,7 +427,10 @@ class config(inspect):
         for vmi in vmis:
             vns = [vn['uuid'] for vn in vmi['virtual_network_refs']]
             assigned_vns.extend([':'.join(self.get('vn', vn)['fq_name']) for vn in vns])
-        assert assigned_vns and (not expected_vns or set(expected_vns) == set(assigned_vns))
+        if assigned_vns and (not expected_vns or set(expected_vns) == set(assigned_vns)):
+            self.log('VMI have link to VN')
+        else:
+            self.log('VMI doesnt have VN refs')
 
     def get_port_obj(self, vmi_id):
         self.port_obj[vmi_id['uuid']]['vn'] = vmi_id['virtual_network_refs']
@@ -435,6 +470,7 @@ class contrail(object):
         self.hosts = dict(); self.ports = dict()
         self.auth = auth_h
         self.args = self.auth.args
+        self.log = log(self).logger
 
     def build(self):
         services = self.discovery.get_services()
@@ -520,7 +556,9 @@ class contrail(object):
                                       self.args.vm_username,
                                       self.args.vm_password)
         if ' 0% packet loss' in output:
+            self.log('Ping works fine from %s to %s'%(vm_id, destination))
             return True
+        self.log('Ping to %s failed from vm_id %s'%(destination, vm_id))
         return False
 
     def verify_fip(self, vm_id, floatingip):
@@ -562,21 +600,22 @@ def parse_args(argv):
     return Struct(build_args(parse_cli()))
 
 def verify_vm(connections, vm_id):
-    assert connections.auth.verify_vm(vm_id), 'VM verification on Orchestrator failed'
-    assert connections.contrail.verify_vm(vm_id), 'VM verification failed'
+    connections.auth.verify_vm(vm_id), 'VM verification on Orchestrator failed'
+    connections.contrail.verify_vm(vm_id), 'VM verification failed'
 
 def verify_vdns(connections, vm_id, destination):
-    assert connections.contrail.verify_vdns(vm_id, destination)
+    connections.contrail.verify_vdns(vm_id, destination)
 
 def verify_fip(connections, vm_id, floatingip):
-    assert connections.contrail.verify_fip(vm_id, floatingip)
+    connections.contrail.verify_fip(vm_id, floatingip)
 
 def main():
     pargs = parse_args(sys.argv[1:])
     conn = connections(pargs)
     verify_vm(conn, pargs.vm_id)
     verify_vdns(conn, pargs.vm_id, pargs.destination)
-    verify_fip(conn, pargs.vm_id, pargs.floatingip)
+    if pargs.destination:
+        verify_fip(conn, pargs.vm_id, pargs.destination)
 
 if __name__ == '__main__':
     main()
