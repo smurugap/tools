@@ -33,7 +33,10 @@ class log(object):
     def __init__(self, cls):
         self.cls = cls
     def logger(self, message):
-        print self.cls.__class__.__name__+':', message
+        prefix = self.cls.__class__.__name__
+        if getattr(self.cls, 'ip', None):
+            prefix = prefix+':'+self.cls.ip
+        print prefix+':', message
 
 class orch(object):
     def __init__(self, args):
