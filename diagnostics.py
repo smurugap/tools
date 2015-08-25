@@ -363,6 +363,7 @@ class control(inspect):
     def verify_prefix(self, vrf_name, prefix, label, nh_type, nh_value):
         for path in self.get_matching_routes(vrf_name, prefix, plen=32, af='v4'):
             if path['label'] == label and path[nh_type] == nh_value:
+                self.log('Route for prefix %s found with label %s'%(prefix, label))
                 return True
         else:
             self.log('Route for prefix %s doesnt exist or has wrong index %s or nh'%(prefix, label))
