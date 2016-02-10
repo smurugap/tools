@@ -283,6 +283,10 @@ class PerTenantWrapper(object):
 
     def pre_conf(self):
         ''' Create certain objects before staring test '''
+        if self._args.vdns:
+            self.obj.create_vdns(self.get_name('vdns', ''))
+        if self._args.ipam:
+            self.obj.create_ipam(self.get_name('ipam', ''))
         if (self._args.n_ports or self._args.n_vms)\
             and not self._args.n_vns:
             vn_name = self.get_name('VN', 'G')
@@ -522,6 +526,8 @@ class UUID(object):
         self.st_obj = dict()
         self.si_obj = dict()
         self.policy_obj = dict()
+        self.ipam_obj = None
+        self.vdns_obj = None
 
 class Openstack(object):
     def __init__(self, auth_url, username, password, tenant, auth_token=None):
@@ -739,12 +745,28 @@ class VNC(Openstack):
                           auth_token=auth_token)
         self.project_obj = self.vnc.project_read(id=str(uuid.UUID(self.tenant_id)))
 
+    def create_vdns(self, vdns_name):
+        vdns_type = VirtualDnsType(domain_name='juniper.net',
+                                   dynamic_records_from_client=True,
+                                   default_ttl_seconds=100,
+                                   record_order='random')
+        vdns_obj = VirtualDns(vdns_name, self.project_obj, virtual_DNS_data=vdns_type)
+        vdns_id = self.vnc.virtual_DNS_create(vdns_obj)
+        self.id.vdns_obj = self.vnc.virtual_DNS_read(id=vdns_id)
+
+    def create_ipam(self, ipam_name):
+        ipam_obj = NetworkIpam(ipam_name, self.project_obj, network_ipam_mgmt=IpamType("dhcp"))
+        if self.id.vdns_obj:
+            ipam_obj.add_virtual_DNS(self.id.vdns_obj)
+        ipam_uuid = self.vnc.network_ipam_create(ipam_obj)
+        self.id.ipam_obj = self.vnc.network_ipam_read(id=ipam_uuid)
+
     def create_network(self, vn_name, mask=24, external=False):
         ''' Create virtual network using VNC api '''
         cidr = get_randmon_cidr(mask=mask).split('/')[0]
         vn_obj = VirtualNetwork(vn_name, self.project_obj,
                                 router_external=external)
-        vn_obj.add_network_ipam(NetworkIpam(),
+        vn_obj.add_network_ipam(self.id.ipam_obj or NetworkIpam(),
                                 VnSubnetsType([IpamSubnetType(
                                 subnet=SubnetType(cidr, mask))]))
         net_id = self.vnc.virtual_network_create(vn_obj)
@@ -969,6 +991,12 @@ def parse_cli(args):
     parser.add_argument('--vnc',
                         action='store_true',
                         help='Use VNC client to configure objects [False]')
+    parser.add_argument('--vdns',
+                        action='store_true',
+                        help='Create VDNS per tenant [False]')
+    parser.add_argument('--ipam',
+                        action='store_true',
+                        help='Create IPAM per tenant [False]')
     parser.add_argument('--cleanup',
                         action='store_true',
                         help='Cleanup the created objects [False]')
