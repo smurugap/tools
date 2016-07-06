@@ -3,7 +3,10 @@ import pytun
 import subprocess
 
 def enable_tapinterface(tap_intf, dummy_dict):
-    dummy_dict[tap_intf] = pytun.TapTunnel(pattern=tap_intf)
+    try:
+        dummy_dict[tap_intf] = pytun.TapTunnel(pattern=tap_intf)
+    except IOError:
+        pass
 
 def get_tapinterfaces():
     output = subprocess.Popen("ip link | grep tap | awk '{print $2}'", stdout=subprocess.PIPE, shell=True, executable="/bin/bash").stdout.read().strip()
