@@ -89,7 +89,7 @@ class ScaleTest(object):
                                          self._args.admin_tenant)
         self.obj = self._args.admin_obj
         self.userid = self.obj.get_user_id(self._args.username)
-        role = 'Member'
+        role = '_member_'
         if self._args.vnc or self._args.n_svc_chains or self._args.n_svc_templates:
             role = 'admin'
         self.roleid = self.obj.get_role_id(role)

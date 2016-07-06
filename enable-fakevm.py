@@ -15,21 +15,28 @@ semantics of real hypervisor connections.
 
 from nova.openstack.common.gettextutils import _
 
-from oslo.config import cfg
+try:
+    from oslo.config import cfg
+except:
+    from oslo_config import cfg
 CONF = cfg.CONF
 from nova.virt import fake
 from nova.virt import virtapi
-from nova.openstack.common import importutils
-from nova_contrail_vif.contrailvif import VRouterVIFDriver
+try:
+    from nova.openstack.common import importutils
+except:
+    from oslo_utils import importutils
+try:
+    from nova_contrail_vif.contrailvif import VRouterVIFDriver as VIFDriver
+except:
+    from nova.virt.libvirt.vif import LibvirtGenericVIFDriver as VIFDriver
 
 _FAKE_NODES = None
 
 class FakeTestDriver(fake.FakeDriver):
     def __init__(self, virtapi, read_only=False):
         super(FakeTestDriver, self).__init__(virtapi)
-
-        vif_class = VRouterVIFDriver
-        self.vif_driver = vif_class(None)
+        self.vif_driver = VIFDriver()
 
     def plug_vifs(self, instance, network_info):
         """Plug VIFs into networks."""
