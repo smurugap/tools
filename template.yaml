@@ -1,0 +1,77 @@
+#api_server_ip: 10.84.7.42
+#api_server_port: 8082
+#auth_url: http://10.84.7.42:35357/v2.0
+#username: admin
+#password: contrail123
+#nova_db_password: c0ntrail123
+#db_host: 10.84.7.42
+#domain_name: default-domain
+tenant_name: cumulus-test-1
+#public_tenant: admin
+#public_vn: Public
+tenant_cidr: 1.1.1.0/24
+instances:
+  - name: inst1
+    cidr: 11.11.11.0/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst2
+    cidr: 11.11.11.8/29
+    image: 545b3307-5204-44ae-96d7-4c9445c8a9f5
+    flavor: 1
+  - name: inst3
+    cidr: 11.11.11.16/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 2
+  - name: inst4
+    cidr: 11.11.11.24/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst5
+    cidr: 11.11.11.32/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst6
+    cidr: 11.11.11.40/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst7
+    cidr: 11.11.11.48/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst8
+    cidr: 11.11.11.56/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst9
+    cidr: 11.11.11.64/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst10
+    cidr: 11.11.11.72/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst11
+    cidr: 11.11.11.80/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst12
+    cidr: 11.11.11.88/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst13
+    cidr: 11.11.11.96/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst14
+    cidr: 11.11.11.104/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst15
+    cidr: 11.11.11.112/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
+  - name: inst16
+    cidr: 11.11.11.120/29
+    image: ceb1f783-cca5-4db0-ab59-4558af2e8010
+    flavor: 1
