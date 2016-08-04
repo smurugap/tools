@@ -8,20 +8,20 @@ from concurrent import futures
 from keystoneclient.v2_0 import client as ks_client
 from novaclient import client as nova_client
 from vnc_api.vnc_api import *
-import MySQLdb
 from datetime import datetime
+import MySQLdb
 
 OS_USERNAME='admin'
 OS_PASSWORD='contrail123'
 OS_DOMAIN_NAME='default-domain'
-OS_AUTH_URL='http://10.84.7.42:35357/v2.0'
-CONTRAIL_API_IP='127.0.0.1'
+OS_AUTH_URL='http://10.93.3.59:5000/v2.0'
+CONTRAIL_API_IP='10.93.3.59'
 CONTRAIL_API_PORT='8082'
 DB_NOVA_PASSWD='c0ntrail123'
-DB_HOST='127.0.0.1'
+DB_HOST='10.93.3.59'
 ADMIN_TENANT='admin'
-ADMIN_USERID='903db2adc51647e1ae2bd3a085ea91d0'
-ADMIN_ROLEID='9fe2ff9ee4384b1894a90878d3e92bab'
+ADMIN_USERID='2ce97b83472e41429fd4b5feb2f1a8aa'
+ADMIN_ROLEID='906dadb2e6344f97b480cb4afb6d63a3'
 PUBLIC_VN='Public'
 
 def time_taken(f):
@@ -214,10 +214,16 @@ class PerTenant(object):
         self.launch_topo()
         self.verify_active()
 
+    @property
+    def client_h(self):
+        if not getattr(self, '_client_h', None):
+            self._client_h = Client(self.tenant_name)
+        return self._client_h
+
     def pre_conf(self):
-        admin_client = Client(ADMIN_TENANT)
-        admin_client.create_tenant(self.tenant_name)
-        self.client_h = Client(self.tenant_name)
+        #admin_client = Client(ADMIN_TENANT)
+        #admin_client.create_tenant(self.tenant_name)
+        #self.client_h = Client(self.tenant_name)
         self.auth_token = self.client_h.auth_token
         self.tenant_id = self.client_h.tenant_id
         self.tenant_obj = self.client_h.get_project(str(uuid.UUID(self.tenant_id)))
@@ -246,24 +252,33 @@ class PerTenant(object):
                         cidr=instance['cidr']).create_topology())
 
     def construct_query(self):
-         vm_ids = set(self.vm_ids) - set(self.active_vm_ids)
-         vms = ['uuid="%s"'%vm_id for vm_id in vm_ids]
-         return 'select vm_state,power_state,uuid from instances where %s;'%(' or '.join(vms))
+        vm_ids = set(self.vm_ids) - set(self.active_vm_ids)
+        vms = ['uuid="%s"'%vm_id for vm_id in vm_ids]
+        return 'select vm_state,power_state,uuid from instances where %s;'%(' or '.join(vms))
 
     def verify_active(self):
-         while True:
-             vm_states = self.client_h.query_db(self.construct_query())
-             for vm_state in vm_states:
-                 if vm_state['vm_state'] == 'active' and int(vm_state['power_state']) == 1:
-                     self.active_vm_ids.append(vm_state['uuid'])
-             if set(self.vm_ids) - set(self.active_vm_ids):
-                 time.sleep(5)
-             else:
-                 break
+        while True:
+            vm_states = self.client_h.query_db(self.construct_query())
+            for vm_state in vm_states:
+                if vm_state['vm_state'] == 'active' and int(vm_state['power_state']) == 1:
+                    self.active_vm_ids.append(vm_state['uuid'])
+            if set(self.vm_ids) - set(self.active_vm_ids):
+                time.sleep(5)
+            else:
+                break
+
+    @time_taken
+    def verify_active_count(self, exp_count):
+        while True:
+            query = "select count(id) from instances where deleted=0 and display_name LIKE 'cumulus-test%' and vm_state='active' and power_state=1;"
+            response = self.client_h.query_db(query)[0]
+            if int(response['count(id)']) == (exp_count):
+                break
+            print 'exp count %s, actual count %s'%(exp_count, response['count(id)'])
+            time.sleep(5)
 
 def main(templates):
     pobjs = list()
-    tenant_name = 'cumulus-test'
     for template in templates:
         with open(template, 'r') as fd:
             try:
@@ -272,12 +287,12 @@ def main(templates):
                 print exc
                 raise
         pobjs.append(PerTenant(yargs['tenant_name'], yargs['tenant_cidr'], yargs['instances']))
-    with futures.ProcessPoolExecutor(max_workers=32) as executor:
-        ##fs = [executor.submit(pobj.launch_and_verify) for pobj in pobjs]
+    with futures.ProcessPoolExecutor(max_workers=64) as executor:
 #        pobjs[0].launch_topo()
         fs = [executor.submit(pobj.launch_topo_wrapper) for pobj in pobjs]
         print 'waiting for all clients to complete'
-        futures.wait(fs, timeout=600, return_when=futures.ALL_COMPLETED)
+        futures.wait(fs, timeout=3600, return_when=futures.ALL_COMPLETED)
+#    pobjs[0].verify_active_count(exp_count=len(pobjs)*len(yargs['instances']))
 
 def parse_cli(args):
     parser = argparse.ArgumentParser(description=__doc__)
