@@ -8,20 +8,20 @@ from concurrent import futures
 from keystoneclient.v2_0 import client as ks_client
 from novaclient import client as nova_client
 from vnc_api.vnc_api import *
-from datetime import datetime
 import MySQLdb
+from datetime import datetime
 
 OS_USERNAME='admin'
 OS_PASSWORD='contrail123'
 OS_DOMAIN_NAME='default-domain'
-OS_AUTH_URL='http://10.93.3.59:5000/v2.0'
-CONTRAIL_API_IP='10.93.3.59'
+OS_AUTH_URL='http://127.0.0.1:5000/v2.0'
+CONTRAIL_API_IP='127.0.0.1'
 CONTRAIL_API_PORT='8082'
 DB_NOVA_PASSWD='c0ntrail123'
-DB_HOST='10.93.3.59'
+DB_HOST='127.0.0.1'
 ADMIN_TENANT='admin'
-ADMIN_USERID='2ce97b83472e41429fd4b5feb2f1a8aa'
-ADMIN_ROLEID='906dadb2e6344f97b480cb4afb6d63a3'
+ADMIN_USERID='903db2adc51647e1ae2bd3a085ea91d0'
+ADMIN_ROLEID='cb2a02eadb194ebe966b426373c2d9b8'
 PUBLIC_VN='Public'
 
 def time_taken(f):
@@ -124,30 +124,50 @@ class Client(object):
         return vn_obj
 
     #@time_taken
+    def delete_network(self, name):
+        fq_name = [OS_DOMAIN_NAME, self.tenant_name, name]
+        self.vnc_api_h.virtual_network_delete(fq_name=fq_name)
+
+    #@time_taken
     def create_port(self, name, vn_obj, sg_obj):
         fq_name = [OS_DOMAIN_NAME, self.tenant_name, name]
+        iip_name = '__'.join(fq_name)
         port_obj = VirtualMachineInterface(name, parent_type='project', fq_name=fq_name)
         port_id = port_obj.uuid = str(uuid.uuid4())
         port_obj.add_virtual_network(vn_obj)
         port_obj.add_security_group(sg_obj)
         self.vnc_api_h.virtual_machine_interface_create(port_obj)
 
-        iip_obj = InstanceIp(name='__'.join(fq_name))
+        iip_obj = InstanceIp(name=iip_name)
         iip_obj.uuid = iip_id = str(uuid.uuid4())
         iip_obj.add_virtual_network(vn_obj)
         iip_obj.add_virtual_machine_interface(port_obj)
         self.vnc_api_h.instance_ip_create(iip_obj)
-        return port_obj
+        return (port_obj, iip_obj)
 
     #@time_taken
-    def create_fip(self, name, port_obj, project_obj):
+    def delete_port(self, name):
+        fq_name = [OS_DOMAIN_NAME, self.tenant_name, name]
+        iip_name = '__'.join(fq_name)
+        self.vnc_api_h.instance_ip_delete(fq_name=[iip_name])
+        self.vnc_api_h.virtual_machine_interface_delete(fq_name=fq_name)
+
+    #@time_taken
+    def create_fip(self, name, port_obj, iip_obj, project_obj):
+        #ip_address = self.vnc_api_h.instance_ip_read(id=iip_obj.uuid).get_instance_ip_address()
         fq_name = [OS_DOMAIN_NAME, ADMIN_TENANT, PUBLIC_VN, "floating-ip-pool", name]
         fip_obj = FloatingIp(name=name, parent_type='floating-ip-pool', fq_name=fq_name)
         fip_id = fip_obj.uuid = str(uuid.uuid4())
         fip_obj.add_virtual_machine_interface(port_obj)
+        #fip_obj.set_floating_ip_fixed_ip_address(ip_address)
         fip_obj.add_project(project_obj)
         self.vnc_api_h.floating_ip_create(fip_obj)
         return fip_obj
+
+    #@time_taken
+    def delete_fip(self, name):
+        fq_name = [OS_DOMAIN_NAME, ADMIN_TENANT, PUBLIC_VN, "floating-ip-pool", name]
+        self.vnc_api_h.floating_ip_delete(fq_name=fq_name)
 
     #@time_taken
     def launch_vm(self, name, ports, flavor, image):
@@ -155,6 +175,15 @@ class Client(object):
         vm_obj = self.nova_h.servers.create(name=name, flavor=flavor,
                                             image=image, nics=nics)
         return vm_obj
+
+    #@time_taken
+    def delete_vm(self, name):
+        query = 'select uuid from instances where display_name="%s" and deleted=0;'%name
+        resp = self.query_db(query)
+        if not resp or len(resp) < 1:
+            return
+        vm_id = resp[0]['uuid']
+        self.nova_h.servers.delete(vm_id)
 
     #@time_taken
     def get_network(self, vn_id):
@@ -169,8 +198,15 @@ class Client(object):
         return self.vnc_api_h.security_group_read(id=sg_id)
 
 class PerVM(object):
-    def __init__(self, name, tenant_name, auth_token, tenant_obj, tenant_vn_obj, tenant_sg_obj, image_id, flavor_id, cidr):
+    def __init__(self, name, tenant_name, auth_token, tenant_obj=None,
+                 tenant_vn_obj=None, tenant_sg_obj=None, image_id=None,
+                 flavor_id=None, cidr=None):
         self.name = name
+        self.vm_name = name + '_unix'
+        self.t_port_name = name + '_tenant_port'
+        self.fip_name = name + '_fip'
+        self.priv_vn = name + '_private_net'
+        self.p_port_name = name + '_private_port'
         self.tenant_name = tenant_name
         self.tenant_obj = tenant_obj
         self.tenant_vn_obj = tenant_vn_obj
@@ -181,30 +217,46 @@ class PerVM(object):
         self.client_h = Client(self.tenant_name, auth_token)
 
     def create_tenant_port(self):
-        port_obj = self.client_h.create_port(self.name + "_tenant_port",
-                                             self.tenant_vn_obj,
-                                             self.tenant_sg_obj)
-        fip_obj = self.client_h.create_fip(self.name + "_fip", port_obj,
+        (port_obj, iip_obj) = self.client_h.create_port(self.t_port_name,
+                                                        self.tenant_vn_obj,
+                                                        self.tenant_sg_obj)
+        fip_obj = self.client_h.create_fip(self.fip_name,
+                                           port_obj,
+                                           iip_obj,
                                            self.tenant_obj)
         return port_obj.uuid
 
+    def delete_tenant_port(self):
+        self.client_h.delete_fip(self.fip_name)
+        self.client_h.delete_port(self.t_port_name)
+
     def create_private_port(self):
-        vn_obj = self.client_h.create_network(self.name + "_private_net", self.cidr)
-        port_obj = self.client_h.create_port(self.name + "_private_port",
-                                             vn_obj, self.tenant_sg_obj)
+        vn_obj = self.client_h.create_network(self.priv_vn, self.cidr)
+        (port_obj, iip_obj) = self.client_h.create_port(self.p_port_name,
+                                            vn_obj, self.tenant_sg_obj)
         return port_obj.uuid
+
+    def delete_private_port(self):
+        self.client_h.delete_port(self.p_port_name)
+        self.client_h.delete_network(self.priv_vn)
 
     def create_topology(self):
         t_port_id = self.create_tenant_port()
         p_port_id = self.create_private_port()
         nics = [{'port-id': t_port_id}, {'port-id': p_port_id}]
-        vm_obj = self.client_h.launch_vm(self.name + "_unix", [t_port_id, p_port_id],
+        vm_obj = self.client_h.launch_vm(self.vm_name, [t_port_id, p_port_id],
                                          self.flavor_id, self.image_id)
         return vm_obj.id
+
+    def delete_topology(self):
+        self.client_h.delete_vm(self.vm_name)
+        self.delete_tenant_port()
+        self.delete_private_port()
 
 class PerTenant(object):
     def __init__(self, tenant_name, tenant_vn_cidr, instances):
         self.tenant_name = tenant_name
+        self.tenant_vn = self.tenant_name+'_tenant_vn'
         self.tenant_vn_cidr = tenant_vn_cidr
         self.instances = instances
         self.vm_ids = list()
@@ -224,10 +276,9 @@ class PerTenant(object):
         #admin_client = Client(ADMIN_TENANT)
         #admin_client.create_tenant(self.tenant_name)
         #self.client_h = Client(self.tenant_name)
-        self.auth_token = self.client_h.auth_token
         self.tenant_id = self.client_h.tenant_id
         self.tenant_obj = self.client_h.get_project(str(uuid.UUID(self.tenant_id)))
-        self.tenant_vn_obj = self.client_h.create_network(self.tenant_name+"_tenant_vn",
+        self.tenant_vn_obj = self.client_h.create_network(self.tenant_vn,
                                                           self.tenant_vn_cidr)
         sg_id = self.tenant_obj.get_security_groups()[0]['uuid']
         self.tenant_sg_obj = self.client_h.get_security_group(sg_id)
@@ -239,11 +290,11 @@ class PerTenant(object):
     def launch_topo(self):
         self.pre_conf()
         for instance in self.instances:
-            vm_name = '.'.join([self.tenant_name, instance['name']])
+            inst_name = '.'.join([self.tenant_name, instance['name']])
             self.vm_ids.append(
-                        PerVM(name=vm_name,
+                        PerVM(name=inst_name,
                         tenant_name=self.tenant_name,
-                        auth_token=self.auth_token,
+                        auth_token=self.client_h.auth_token,
                         tenant_obj=self.tenant_obj,
                         tenant_vn_obj=self.tenant_vn_obj,
                         tenant_sg_obj=self.tenant_sg_obj,
@@ -277,7 +328,18 @@ class PerTenant(object):
             print 'exp count %s, actual count %s'%(exp_count, response['count(id)'])
             time.sleep(5)
 
-def main(templates):
+    def delete_wrapper(self):
+        return self.delete_topo()
+
+    @time_taken
+    def delete_topo(self):
+        for instance in self.instances:
+            inst_name = '.'.join([self.tenant_name, instance['name']])
+            PerVM(name=inst_name, tenant_name=self.tenant_name,
+                  auth_token=self.client_h.auth_token).delete_topology()
+        self.client_h.delete_network(self.tenant_vn)
+
+def main(templates, oper):
     pobjs = list()
     for template in templates:
         with open(template, 'r') as fd:
@@ -289,7 +351,15 @@ def main(templates):
         pobjs.append(PerTenant(yargs['tenant_name'], yargs['tenant_cidr'], yargs['instances']))
     with futures.ProcessPoolExecutor(max_workers=64) as executor:
 #        pobjs[0].launch_topo()
-        fs = [executor.submit(pobj.launch_topo_wrapper) for pobj in pobjs]
+#        fs = [executor.submit(pobj.launch_topo_wrapper) for pobj in pobjs]
+        if oper.lower().startswith('del'):
+            #pobjs[0].delete_wrapper()
+            fs = [executor.submit(pobj.delete_wrapper) for pobj in pobjs]
+        elif oper.lower() == 'add':
+            #pobjs[0].launch_and_verify()
+            fs = [executor.submit(pobj.launch_and_verify) for pobj in pobjs]
+        else:
+            raise Exception()
         print 'waiting for all clients to complete'
         futures.wait(fs, timeout=3600, return_when=futures.ALL_COMPLETED)
 #    pobjs[0].verify_active_count(exp_count=len(pobjs)*len(yargs['instances']))
@@ -298,9 +368,11 @@ def parse_cli(args):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('-t', '--templates', required=True, metavar="FILE",
                         nargs='+', help='location of the yaml template files')
+    parser.add_argument('-o', '--oper', default='add',
+                        help='Operation to perform (add/delete)')
     pargs = parser.parse_args(args)
     return pargs
 
 if __name__ == '__main__':
     pargs = parse_cli(sys.argv[1:])
-    main(pargs.templates)
+    main(pargs.templates, pargs.oper)
