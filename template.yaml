@@ -15,6 +15,11 @@ instances:
     cidr: 11.11.11.0/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
+    metadata:
+       foo: bar
+       foo1: bar1
+    personality:
+       /tmp/hosts: /etc/hosts
   - name: inst2
     cidr: 11.11.11.8/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3

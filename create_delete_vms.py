@@ -170,10 +170,15 @@ class Client(object):
         self.vnc_api_h.floating_ip_delete(fq_name=fq_name)
 
     #@time_taken
-    def launch_vm(self, name, ports, flavor, image):
+    def launch_vm(self, name, ports, flavor, image, metadata=None, personality=None):
         nics = [{'port-id': port} for port in ports]
+        files = None
+        if personality:
+            files = {k: open(v, 'r') for k,v in personality.iteritems()}
         vm_obj = self.nova_h.servers.create(name=name, flavor=flavor,
-                                            image=image, nics=nics)
+                                            image=image, nics=nics,
+                                            meta=metadata, files=files,
+                                            config_drive=True if metadata else None)
         return vm_obj
 
     #@time_taken
@@ -200,7 +205,7 @@ class Client(object):
 class PerVM(object):
     def __init__(self, name, tenant_name, auth_token, tenant_obj=None,
                  tenant_vn_obj=None, tenant_sg_obj=None, image_id=None,
-                 flavor_id=None, cidr=None):
+                 flavor_id=None, cidr=None, metadata=None, personality=None):
         self.name = name
         self.vm_name = name + '_unix'
         self.t_port_name = name + '_tenant_port'
@@ -215,6 +220,8 @@ class PerVM(object):
         self.flavor_id = flavor_id
         self.cidr = cidr
         self.client_h = Client(self.tenant_name, auth_token)
+        self.metadata = metadata
+        self.personality = personality
 
     def create_tenant_port(self):
         (port_obj, iip_obj) = self.client_h.create_port(self.t_port_name,
@@ -245,7 +252,9 @@ class PerVM(object):
         p_port_id = self.create_private_port()
         nics = [{'port-id': t_port_id}, {'port-id': p_port_id}]
         vm_obj = self.client_h.launch_vm(self.vm_name, [t_port_id, p_port_id],
-                                         self.flavor_id, self.image_id)
+                                         self.flavor_id, self.image_id,
+                                         metadata=self.metadata,
+                                         personality=self.personality)
         return vm_obj.id
 
     def delete_topology(self):
@@ -300,7 +309,9 @@ class PerTenant(object):
                         tenant_sg_obj=self.tenant_sg_obj,
                         image_id=instance['image'],
                         flavor_id=instance['flavor'],
-                        cidr=instance['cidr']).create_topology())
+                        cidr=instance['cidr'],
+                        metadata=instance.get('metadata'),
+                        personality=instance.get('personality')).create_topology())
 
     def construct_query(self):
         vm_ids = set(self.vm_ids) - set(self.active_vm_ids)
