@@ -6,233 +6,189 @@
 #nova_db_password: c0ntrail123
 #db_host: 10.84.7.42
 #domain_name: default-domain
-tenant_name: test-1
+tenant_name: cumulus-test-1
 #public_tenant: admin
 #public_vn: Public
 tenant_cidr: 1.1.1.0/24
+ctrl_cidr: 192.168.2.0/24
+fabric_cidr: 192.168.3.0/24
+private_cidrs:
+    private1: 192.168.10.0/24
+    private2: 192.168.11.0/24
 instances:
   - name: inst1
-    cidr: 11.11.11.0/29
-    image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
-    flavor: 1
+    image: 94ffe88d-7887-432f-8780-cf75f63d5f74
+    flavor: 2
     metadata:
        foo: bar
        foo1: bar1
     personality:
        /tmp/hosts: /etc/hosts
+    private_networks:
+       - private1
+       - private2
   - name: inst2
-    cidr: 11.11.11.8/29
-    image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
+    image: 94ffe88d-7887-432f-8780-cf75f63d5f74
     flavor: 1
+    use_fabric: True
+    private_networks:
+       - private1
   - name: inst3
-    cidr: 11.11.11.16/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 2
   - name: inst4
-    cidr: 11.11.11.24/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst5
-    cidr: 11.11.11.32/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst6
-    cidr: 11.11.11.40/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst7
-    cidr: 11.11.11.48/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst8
-    cidr: 11.11.11.56/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst9
-    cidr: 11.11.11.64/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst10
-    cidr: 11.11.11.72/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst11
-    cidr: 11.11.11.80/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst12
-    cidr: 11.11.11.88/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst13
-    cidr: 11.11.11.96/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst14
-    cidr: 11.11.11.104/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst15
-    cidr: 11.11.11.112/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst16
-    cidr: 11.11.11.120/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst17
-    cidr: 11.11.11.128/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst18
-    cidr: 11.11.11.136/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst19
-    cidr: 11.11.11.144/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst20
-    cidr: 11.11.11.152/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst21
-    cidr: 11.11.11.160/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst22
-    cidr: 11.11.11.168/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst23
-    cidr: 11.11.11.176/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst24
-    cidr: 11.11.11.184/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst25
-    cidr: 11.11.11.192/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst26
-    cidr: 11.11.11.200/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst27
-    cidr: 11.11.11.208/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst28
-    cidr: 11.11.11.216/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst29
-    cidr: 11.11.11.224/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst30
-    cidr: 11.11.11.232/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst31
-    cidr: 11.11.11.240/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst32
-    cidr: 11.11.11.248/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst33
-    cidr: 11.11.12.0/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst34
-    cidr: 11.11.12.8/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst35
-    cidr: 11.11.12.16/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst36
-    cidr: 11.11.12.24/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst37
-    cidr: 11.11.12.32/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst38
-    cidr: 11.11.12.40/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst39
-    cidr: 11.11.12.48/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst40
-    cidr: 11.11.12.56/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst41
-    cidr: 11.11.12.64/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst42
-    cidr: 11.11.12.72/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst43
-    cidr: 11.11.12.80/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst44
-    cidr: 11.11.12.88/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst45
-    cidr: 11.11.12.96/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst46
-    cidr: 11.11.12.104/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst47
-    cidr: 11.11.12.112/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst48
-    cidr: 11.11.12.120/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst49
-    cidr: 11.11.12.128/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst50
-    cidr: 11.11.12.136/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst51
-    cidr: 11.11.12.144/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst52
-    cidr: 11.11.12.152/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst53
-    cidr: 11.11.12.160/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst54
-    cidr: 11.11.12.168/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1
   - name: inst55
-    cidr: 11.11.12.176/29
     image: 2838ff3e-a4b6-4caa-b8dc-592fde88efc3
     flavor: 1

@@ -10,6 +10,7 @@ from novaclient import client as nova_client
 from vnc_api.vnc_api import *
 import MySQLdb
 from datetime import datetime
+import logging
 
 OS_USERNAME='admin'
 OS_PASSWORD='contrail123'
@@ -22,7 +23,8 @@ DB_HOST='127.0.0.1'
 ADMIN_TENANT='admin'
 ADMIN_USERID='903db2adc51647e1ae2bd3a085ea91d0'
 ADMIN_ROLEID='cb2a02eadb194ebe966b426373c2d9b8'
-PUBLIC_VN='Public'
+FIP_POOL_FQNAME='default-domain:demo:ext-net:default'
+log = True
 
 def time_taken(f):
     def wrapper(*args, **kwargs):
@@ -126,8 +128,10 @@ class Client(object):
     #@time_taken
     def delete_network(self, name):
         fq_name = [OS_DOMAIN_NAME, self.tenant_name, name]
-        self.vnc_api_h.virtual_network_delete(fq_name=fq_name)
-
+        try:
+            self.vnc_api_h.virtual_network_delete(fq_name=fq_name)
+        except NoIdError:
+            pass
     #@time_taken
     def create_port(self, name, vn_obj, sg_obj):
         fq_name = [OS_DOMAIN_NAME, self.tenant_name, name]
@@ -149,13 +153,19 @@ class Client(object):
     def delete_port(self, name):
         fq_name = [OS_DOMAIN_NAME, self.tenant_name, name]
         iip_name = '__'.join(fq_name)
-        self.vnc_api_h.instance_ip_delete(fq_name=[iip_name])
-        self.vnc_api_h.virtual_machine_interface_delete(fq_name=fq_name)
+        try:
+            self.vnc_api_h.instance_ip_delete(fq_name=[iip_name])
+        except NoIdError:
+            pass
+        try:
+            self.vnc_api_h.virtual_machine_interface_delete(fq_name=fq_name)
+        except NoIdError:
+            pass
 
     #@time_taken
     def create_fip(self, name, port_obj, iip_obj, project_obj):
         #ip_address = self.vnc_api_h.instance_ip_read(id=iip_obj.uuid).get_instance_ip_address()
-        fq_name = [OS_DOMAIN_NAME, ADMIN_TENANT, PUBLIC_VN, "floating-ip-pool", name]
+        fq_name = FIP_POOL_FQNAME.split(':') + [name]
         fip_obj = FloatingIp(name=name, parent_type='floating-ip-pool', fq_name=fq_name)
         fip_id = fip_obj.uuid = str(uuid.uuid4())
         fip_obj.add_virtual_machine_interface(port_obj)
@@ -166,8 +176,11 @@ class Client(object):
 
     #@time_taken
     def delete_fip(self, name):
-        fq_name = [OS_DOMAIN_NAME, ADMIN_TENANT, PUBLIC_VN, "floating-ip-pool", name]
-        self.vnc_api_h.floating_ip_delete(fq_name=fq_name)
+        fq_name = FIP_POOL_FQNAME.split(":") + [name]
+        try:
+            self.vnc_api_h.floating_ip_delete(fq_name=fq_name)
+        except:
+            pass
 
     #@time_taken
     def launch_vm(self, name, ports, flavor, image, metadata=None, personality=None):
@@ -175,6 +188,9 @@ class Client(object):
         files = None
         if personality:
             files = {k: open(v, 'r') for k,v in personality.iteritems()}
+        if metadata:
+            for k in metadata.keys():
+                metadata[k] = str(metadata[k])
         vm_obj = self.nova_h.servers.create(name=name, flavor=flavor,
                                             image=image, nics=nics,
                                             meta=metadata, files=files,
@@ -204,24 +220,33 @@ class Client(object):
 
 class PerVM(object):
     def __init__(self, name, tenant_name, auth_token, tenant_obj=None,
-                 tenant_vn_obj=None, tenant_sg_obj=None, image_id=None,
-                 flavor_id=None, cidr=None, metadata=None, personality=None):
+                 tenant_vn_obj=None, ctrl_vn_obj=None, fabric_vn_obj=None,
+                 private_vn_objs=None, tenant_sg_obj=None, image_id=None,
+                 flavor_id=None, use_fabric=None, private_networks=None,
+                 metadata=None, personality=None):
         self.name = name
         self.vm_name = name + '_unix'
         self.t_port_name = name + '_tenant_port'
+        self.c_port_name = name + '_ctrl_port'
+        self.f_port_name = name + '_fabric_port'
         self.fip_name = name + '_fip'
-        self.priv_vn = name + '_private_net'
-        self.p_port_name = name + '_private_port'
         self.tenant_name = tenant_name
         self.tenant_obj = tenant_obj
         self.tenant_vn_obj = tenant_vn_obj
+        self.ctrl_vn_obj = ctrl_vn_obj
+        self.fabric_vn_obj = fabric_vn_obj
+        self.private_vn_objs = private_vn_objs
         self.tenant_sg_obj = tenant_sg_obj
         self.image_id = image_id
         self.flavor_id = flavor_id
-        self.cidr = cidr
         self.client_h = Client(self.tenant_name, auth_token)
+        self.use_fabric = use_fabric
+        self.private_networks = private_networks
         self.metadata = metadata
         self.personality = personality
+        if log:
+            logging.basicConfig(filename=name+'.log', level=logging.DEBUG)
+            self.log = logging.getLogger(name)
 
     def create_tenant_port(self):
         (port_obj, iip_obj) = self.client_h.create_port(self.t_port_name,
@@ -237,36 +262,77 @@ class PerVM(object):
         self.client_h.delete_fip(self.fip_name)
         self.client_h.delete_port(self.t_port_name)
 
-    def create_private_port(self):
-        vn_obj = self.client_h.create_network(self.priv_vn, self.cidr)
-        (port_obj, iip_obj) = self.client_h.create_port(self.p_port_name,
+    def create_private_ports(self):
+        ports = list()
+        for priv_vn in self.private_networks:
+            vn_obj = self.private_vn_objs[priv_vn]
+            p_port_name = self.name + '_' + priv_vn + '_priv_port'
+            (port_obj, iip_obj) = self.client_h.create_port(p_port_name,
                                             vn_obj, self.tenant_sg_obj)
+            ports.append(port_obj.uuid)
+        return ports
+
+    def delete_private_ports(self):
+        ports = list()
+        for priv_vn in self.private_networks:
+            p_port_name = self.name + '_' + priv_vn + '_priv_port'
+            self.client_h.delete_port(p_port_name)
+
+    def create_ctrl_port(self):
+        (port_obj, iip_obj) = self.client_h.create_port(self.c_port_name,
+                                            self.ctrl_vn_obj, self.tenant_sg_obj)
         return port_obj.uuid
 
-    def delete_private_port(self):
-        self.client_h.delete_port(self.p_port_name)
-        self.client_h.delete_network(self.priv_vn)
+    def delete_ctrl_port(self):
+        self.client_h.delete_port(self.c_port_name)
+
+    def create_fabric_port(self):
+        (port_obj, iip_obj) = self.client_h.create_port(self.f_port_name,
+                                            self.fabric_vn_obj, self.tenant_sg_obj)
+        return port_obj.uuid
+
+    def delete_fabric_port(self):
+        self.client_h.delete_port(self.f_port_name)
 
     def create_topology(self):
-        t_port_id = self.create_tenant_port()
-        p_port_id = self.create_private_port()
-        nics = [{'port-id': t_port_id}, {'port-id': p_port_id}]
-        vm_obj = self.client_h.launch_vm(self.vm_name, [t_port_id, p_port_id],
-                                         self.flavor_id, self.image_id,
-                                         metadata=self.metadata,
-                                         personality=self.personality)
-        return vm_obj.id
+        try:
+            t_port_id = self.create_tenant_port()
+            c_port_id = self.create_ctrl_port()
+            nics = [t_port_id, c_port_id]
+            if self.use_fabric:
+                f_port_id = self.create_fabric_port()
+                nics.append(f_port_id)
+            if self.private_networks:
+                p_port_ids = self.create_private_ports()
+                nics.extend(p_port_ids)
+            vm_obj = self.client_h.launch_vm(self.vm_name, nics,
+                                             self.flavor_id, self.image_id,
+                                             metadata=self.metadata,
+                                             personality=self.personality)
+            return vm_obj.id
+        except:
+            if log:
+                self.log.exception('Exception for instance'+self.name)
 
     def delete_topology(self):
         self.client_h.delete_vm(self.vm_name)
         self.delete_tenant_port()
-        self.delete_private_port()
+        self.delete_ctrl_port()
+        if self.use_fabric:
+            self.delete_fabric_port()
+        if self.private_networks:
+            self.delete_private_ports()
 
 class PerTenant(object):
-    def __init__(self, tenant_name, tenant_vn_cidr, instances):
+    def __init__(self, tenant_name, tenant_vn_cidr, instances, ctrl_cidr, fabric_cidr, private_cidrs):
         self.tenant_name = tenant_name
         self.tenant_vn = self.tenant_name+'_tenant_vn'
+        self.ctrl_vn = self.tenant_name+'_ctrl_vn'
+        self.fabric_vn = self.tenant_name+'_fabric_vn'
         self.tenant_vn_cidr = tenant_vn_cidr
+        self.ctrl_cidr = ctrl_cidr
+        self.fabric_cidr = fabric_cidr
+        self.private_cidrs = private_cidrs
         self.instances = instances
         self.vm_ids = list()
         self.active_vm_ids = list()
@@ -289,6 +355,15 @@ class PerTenant(object):
         self.tenant_obj = self.client_h.get_project(str(uuid.UUID(self.tenant_id)))
         self.tenant_vn_obj = self.client_h.create_network(self.tenant_vn,
                                                           self.tenant_vn_cidr)
+        self.ctrl_vn_obj = self.client_h.create_network(self.ctrl_vn,
+                                                          self.ctrl_cidr)
+        self.fabric_vn_obj = self.client_h.create_network(self.fabric_vn,
+                                                          self.fabric_cidr)
+        self.private_vn_objs = dict()
+        for priv_vn, priv_cidr in self.private_cidrs.iteritems():
+            self.private_vn_objs[priv_vn] = self.client_h.create_network(
+                                                 self.tenant_name+'_'+priv_vn,
+                                                 priv_cidr)
         sg_id = self.tenant_obj.get_security_groups()[0]['uuid']
         self.tenant_sg_obj = self.client_h.get_security_group(sg_id)
 
@@ -300,18 +375,23 @@ class PerTenant(object):
         self.pre_conf()
         for instance in self.instances:
             inst_name = '.'.join([self.tenant_name, instance['name']])
-            self.vm_ids.append(
-                        PerVM(name=inst_name,
-                        tenant_name=self.tenant_name,
-                        auth_token=self.client_h.auth_token,
-                        tenant_obj=self.tenant_obj,
-                        tenant_vn_obj=self.tenant_vn_obj,
-                        tenant_sg_obj=self.tenant_sg_obj,
-                        image_id=instance['image'],
-                        flavor_id=instance['flavor'],
-                        cidr=instance['cidr'],
-                        metadata=instance.get('metadata'),
-                        personality=instance.get('personality')).create_topology())
+            vm_id = PerVM(name=inst_name,
+                          tenant_name=self.tenant_name,
+                          auth_token=self.client_h.auth_token,
+                          tenant_obj=self.tenant_obj,
+                          tenant_vn_obj=self.tenant_vn_obj,
+                          ctrl_vn_obj=self.ctrl_vn_obj,
+                          fabric_vn_obj=self.fabric_vn_obj,
+                          private_vn_objs=self.private_vn_objs,
+                          tenant_sg_obj=self.tenant_sg_obj,
+                          image_id=instance['image'],
+                          flavor_id=instance['flavor'],
+                          use_fabric=instance.get('use_fabric'),
+                          private_networks=instance.get('private_networks'),
+                          metadata=instance.get('metadata'),
+                          personality=instance.get('personality')).create_topology()
+            if vm_id:
+                self.vm_ids.append(vm_id)
 
     def construct_query(self):
         vm_ids = set(self.vm_ids) - set(self.active_vm_ids)
@@ -347,8 +427,14 @@ class PerTenant(object):
         for instance in self.instances:
             inst_name = '.'.join([self.tenant_name, instance['name']])
             PerVM(name=inst_name, tenant_name=self.tenant_name,
+                  use_fabric=instance.get('use_fabric'),
+                  private_networks=instance.get('private_networks'),
                   auth_token=self.client_h.auth_token).delete_topology()
         self.client_h.delete_network(self.tenant_vn)
+        self.client_h.delete_network(self.ctrl_vn)
+        self.client_h.delete_network(self.fabric_vn)
+        for priv_vn, priv_cidr in self.private_cidrs.iteritems():
+            self.client_h.delete_network(self.tenant_name+'_'+priv_vn)
 
 def main(templates, oper):
     pobjs = list()
@@ -359,7 +445,8 @@ def main(templates, oper):
             except yaml.YAMLError as exc:
                 print exc
                 raise
-        pobjs.append(PerTenant(yargs['tenant_name'], yargs['tenant_cidr'], yargs['instances']))
+        pobjs.append(PerTeant(yargs['tenant_name'], yargs['tenant_cidr'], yargs['instances'],
+                              yargs['ctrl_cidr'], yargs['fabric_cidr'], yargs['private_cidrs']))
     with futures.ProcessPoolExecutor(max_workers=64) as executor:
 #        pobjs[0].launch_topo()
 #        fs = [executor.submit(pobj.launch_topo_wrapper) for pobj in pobjs]
@@ -367,12 +454,12 @@ def main(templates, oper):
             #pobjs[0].delete_wrapper()
             fs = [executor.submit(pobj.delete_wrapper) for pobj in pobjs]
         elif oper.lower() == 'add':
-            #pobjs[0].launch_and_verify()
-            fs = [executor.submit(pobj.launch_and_verify) for pobj in pobjs]
+            pobjs[0].launch_and_verify()
+            #fs = [executor.submit(pobj.launch_and_verify) for pobj in pobjs]
         else:
             raise Exception()
         print 'waiting for all clients to complete'
-        futures.wait(fs, timeout=3600, return_when=futures.ALL_COMPLETED)
+#        futures.wait(fs, timeout=3600, return_when=futures.ALL_COMPLETED)
 #    pobjs[0].verify_active_count(exp_count=len(pobjs)*len(yargs['instances']))
 
 def parse_cli(args):
