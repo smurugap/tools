@@ -23,7 +23,7 @@ DB_HOST='127.0.0.1'
 ADMIN_TENANT='admin'
 ADMIN_USERID='903db2adc51647e1ae2bd3a085ea91d0'
 ADMIN_ROLEID='cb2a02eadb194ebe966b426373c2d9b8'
-FIP_POOL_FQNAME='default-domain:demo:ext-net:default'
+FIP_POOL_FQNAME='default-domain:admin:Public:floating-ip-pool'
 log = True
 
 def time_taken(f):
@@ -115,13 +115,20 @@ class Client(object):
                                           role=ADMIN_ROLEID)
 
     #@time_taken
-    def create_network(self, name, cidr):
+    def create_network(self, name, cidr, properties=None):
         network, mask = cidr.split('/')
         fq_name = [OS_DOMAIN_NAME, self.tenant_name, name]
         vn_obj = VirtualNetwork(name, parent_type='project', fq_name=fq_name)
         vn_obj.add_network_ipam(NetworkIpam(),
                                 VnSubnetsType([IpamSubnetType(
                                 subnet=SubnetType(network, int(mask)))]))
+        if properties:
+            if properties.get('flood_unknown_unicast') == True:
+                vn_obj.flood_unknown_unicast = True
+            vn_prop = VirtualNetworkType()
+            if properties.get('forwarding_mode'):
+                vn_prop.set_forwarding_mode(properties.get('forwarding_mode'))
+            vn_obj.set_virtual_network_properties(vn_prop)
         self.vnc_api_h.virtual_network_create(vn_obj)
         return vn_obj
 
@@ -220,9 +227,9 @@ class Client(object):
 
 class PerVM(object):
     def __init__(self, name, tenant_name, auth_token, tenant_obj=None,
-                 tenant_vn_obj=None, ctrl_vn_obj=None, fabric_vn_obj=None,
-                 private_vn_objs=None, tenant_sg_obj=None, image_id=None,
-                 flavor_id=None, use_fabric=None, private_networks=None,
+                 tenant_vn_obj=None, tenant_sg_obj=None, image_id=None,
+                 flavor_id=None, vn_objs=None, private_networks=None,
+                 ctrl_network=None, fabric_network=None,
                  metadata=None, personality=None):
         self.name = name
         self.vm_name = name + '_unix'
@@ -233,17 +240,16 @@ class PerVM(object):
         self.tenant_name = tenant_name
         self.tenant_obj = tenant_obj
         self.tenant_vn_obj = tenant_vn_obj
-        self.ctrl_vn_obj = ctrl_vn_obj
-        self.fabric_vn_obj = fabric_vn_obj
-        self.private_vn_objs = private_vn_objs
         self.tenant_sg_obj = tenant_sg_obj
+        self.vn_objs = vn_objs
         self.image_id = image_id
         self.flavor_id = flavor_id
-        self.client_h = Client(self.tenant_name, auth_token)
-        self.use_fabric = use_fabric
         self.private_networks = private_networks
+        self.ctrl_network = ctrl_network
+        self.fabric_network = fabric_network
         self.metadata = metadata
         self.personality = personality
+        self.client_h = Client(self.tenant_name, auth_token)
         if log:
             logging.basicConfig(filename=name+'.log', level=logging.DEBUG)
             self.log = logging.getLogger(name)
@@ -265,7 +271,7 @@ class PerVM(object):
     def create_private_ports(self):
         ports = list()
         for priv_vn in self.private_networks:
-            vn_obj = self.private_vn_objs[priv_vn]
+            vn_obj = self.vn_objs[priv_vn]
             p_port_name = self.name + '_' + priv_vn + '_priv_port'
             (port_obj, iip_obj) = self.client_h.create_port(p_port_name,
                                             vn_obj, self.tenant_sg_obj)
@@ -279,16 +285,18 @@ class PerVM(object):
             self.client_h.delete_port(p_port_name)
 
     def create_ctrl_port(self):
+        ctrl_vn_obj = self.vn_objs[self.ctrl_network]
         (port_obj, iip_obj) = self.client_h.create_port(self.c_port_name,
-                                            self.ctrl_vn_obj, self.tenant_sg_obj)
+                                            ctrl_vn_obj, self.tenant_sg_obj)
         return port_obj.uuid
 
     def delete_ctrl_port(self):
         self.client_h.delete_port(self.c_port_name)
 
     def create_fabric_port(self):
+        fabric_vn_obj = self.vn_objs[self.fabric_network]
         (port_obj, iip_obj) = self.client_h.create_port(self.f_port_name,
-                                            self.fabric_vn_obj, self.tenant_sg_obj)
+                                            fabric_vn_obj, self.tenant_sg_obj)
         return port_obj.uuid
 
     def delete_fabric_port(self):
@@ -297,9 +305,11 @@ class PerVM(object):
     def create_topology(self):
         try:
             t_port_id = self.create_tenant_port()
-            c_port_id = self.create_ctrl_port()
-            nics = [t_port_id, c_port_id]
-            if self.use_fabric:
+            nics = [t_port_id]
+            if self.ctrl_network:
+                c_port_id = self.create_ctrl_port()
+                nics.append(c_port_id)
+            if self.fabric_network:
                 f_port_id = self.create_fabric_port()
                 nics.append(f_port_id)
             if self.private_networks:
@@ -317,23 +327,21 @@ class PerVM(object):
     def delete_topology(self):
         self.client_h.delete_vm(self.vm_name)
         self.delete_tenant_port()
-        self.delete_ctrl_port()
-        if self.use_fabric:
+        if self.ctrl_network:
+            self.delete_ctrl_port()
+        if self.fabric_network:
             self.delete_fabric_port()
         if self.private_networks:
             self.delete_private_ports()
 
 class PerTenant(object):
-    def __init__(self, tenant_name, tenant_vn_cidr, instances, ctrl_cidr, fabric_cidr, private_cidrs):
+    def __init__(self, tenant_name, tenant_vn_cidr, instances, networks):
         self.tenant_name = tenant_name
         self.tenant_vn = self.tenant_name+'_tenant_vn'
-        self.ctrl_vn = self.tenant_name+'_ctrl_vn'
-        self.fabric_vn = self.tenant_name+'_fabric_vn'
         self.tenant_vn_cidr = tenant_vn_cidr
-        self.ctrl_cidr = ctrl_cidr
-        self.fabric_cidr = fabric_cidr
-        self.private_cidrs = private_cidrs
         self.instances = instances
+        self.networks = networks
+        self.vn_objs = dict()
         self.vm_ids = list()
         self.active_vm_ids = list()
 
@@ -354,16 +362,12 @@ class PerTenant(object):
         self.tenant_id = self.client_h.tenant_id
         self.tenant_obj = self.client_h.get_project(str(uuid.UUID(self.tenant_id)))
         self.tenant_vn_obj = self.client_h.create_network(self.tenant_vn,
-                                                          self.tenant_vn_cidr)
-        self.ctrl_vn_obj = self.client_h.create_network(self.ctrl_vn,
-                                                          self.ctrl_cidr)
-        self.fabric_vn_obj = self.client_h.create_network(self.fabric_vn,
-                                                          self.fabric_cidr)
-        self.private_vn_objs = dict()
-        for priv_vn, priv_cidr in self.private_cidrs.iteritems():
-            self.private_vn_objs[priv_vn] = self.client_h.create_network(
-                                                 self.tenant_name+'_'+priv_vn,
-                                                 priv_cidr)
+                                                          cidr=self.tenant_vn_cidr)
+        for vn_name, vn_prop in self.networks.iteritems():
+            self.vn_objs[vn_name] = self.client_h.create_network(
+                                                 self.tenant_name+'_'+vn_name,
+                                                 cidr=vn_prop['cidr'],
+                                                 properties=vn_prop)
         sg_id = self.tenant_obj.get_security_groups()[0]['uuid']
         self.tenant_sg_obj = self.client_h.get_security_group(sg_id)
 
@@ -380,14 +384,13 @@ class PerTenant(object):
                           auth_token=self.client_h.auth_token,
                           tenant_obj=self.tenant_obj,
                           tenant_vn_obj=self.tenant_vn_obj,
-                          ctrl_vn_obj=self.ctrl_vn_obj,
-                          fabric_vn_obj=self.fabric_vn_obj,
-                          private_vn_objs=self.private_vn_objs,
                           tenant_sg_obj=self.tenant_sg_obj,
+                          vn_objs=self.vn_objs,
                           image_id=instance['image'],
                           flavor_id=instance['flavor'],
-                          use_fabric=instance.get('use_fabric'),
                           private_networks=instance.get('private_networks'),
+                          ctrl_network=instance.get('ctrl_network'),
+                          fabric_network=instance.get('fabric_network'),
                           metadata=instance.get('metadata'),
                           personality=instance.get('personality')).create_topology()
             if vm_id:
@@ -427,14 +430,13 @@ class PerTenant(object):
         for instance in self.instances:
             inst_name = '.'.join([self.tenant_name, instance['name']])
             PerVM(name=inst_name, tenant_name=self.tenant_name,
-                  use_fabric=instance.get('use_fabric'),
                   private_networks=instance.get('private_networks'),
+                  ctrl_network=instance.get('ctrl_network'),
+                  fabric_network=instance.get('fabric_network'),
                   auth_token=self.client_h.auth_token).delete_topology()
         self.client_h.delete_network(self.tenant_vn)
-        self.client_h.delete_network(self.ctrl_vn)
-        self.client_h.delete_network(self.fabric_vn)
-        for priv_vn, priv_cidr in self.private_cidrs.iteritems():
-            self.client_h.delete_network(self.tenant_name+'_'+priv_vn)
+        for vn_name, vn_prop in self.networks.iteritems():
+            self.client_h.delete_network(self.tenant_name+'_'+vn_name)
 
 def main(templates, oper):
     pobjs = list()
@@ -445,14 +447,14 @@ def main(templates, oper):
             except yaml.YAMLError as exc:
                 print exc
                 raise
-        pobjs.append(PerTeant(yargs['tenant_name'], yargs['tenant_cidr'], yargs['instances'],
-                              yargs['ctrl_cidr'], yargs['fabric_cidr'], yargs['private_cidrs']))
+        pobjs.append(PerTenant(yargs['tenant_name'], yargs['tenant_cidr'], yargs['instances'],
+                              yargs['networks']))
     with futures.ProcessPoolExecutor(max_workers=64) as executor:
 #        pobjs[0].launch_topo()
 #        fs = [executor.submit(pobj.launch_topo_wrapper) for pobj in pobjs]
         if oper.lower().startswith('del'):
-            #pobjs[0].delete_wrapper()
-            fs = [executor.submit(pobj.delete_wrapper) for pobj in pobjs]
+            pobjs[0].delete_wrapper()
+            #fs = [executor.submit(pobj.delete_wrapper) for pobj in pobjs]
         elif oper.lower() == 'add':
             pobjs[0].launch_and_verify()
             #fs = [executor.submit(pobj.launch_and_verify) for pobj in pobjs]
