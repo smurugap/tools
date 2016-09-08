@@ -9,8 +9,10 @@
 tenant_name: cumulus-test-1
 #public_tenant: admin
 #public_vn: Public
-tenant_cidr: 192.168.1.0/24
 networks:
+    tenant:
+       cidr: 192.168.1.0/24
+       gateway: 192.168.1.128
     private1:
        cidr: 192.168.10.0/24
     private2:
@@ -39,6 +41,10 @@ instances:
     metadata:
        foo: bar
        foo1: bar1
+       gateway: 192.168.1.128
+    metadata_refs:
+       re0_ip: R1_RE0
+       re1_ip: R1_RE1
     personality:
        /tmp/hosts: /etc/hosts
     private_networks:
@@ -48,6 +54,9 @@ instances:
   - name: R1_RE1
     image: 94ffe88d-7887-432f-8780-cf75f63d5f74
     flavor: 2
+    metadata_refs:
+       re0_ip: R1_RE0
+       re1_ip: R1_RE1
     private_networks:
        - private1
     ctrl_network: ctrl1

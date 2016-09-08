@@ -118,17 +118,18 @@ class Client(object):
     def create_network(self, name, cidr, properties=None):
         network, mask = cidr.split('/')
         fq_name = [OS_DOMAIN_NAME, self.tenant_name, name]
+        ipam_subnet_type = IpamSubnetType(subnet=SubnetType(network, int(mask)))
         vn_obj = VirtualNetwork(name, parent_type='project', fq_name=fq_name)
-        vn_obj.add_network_ipam(NetworkIpam(),
-                                VnSubnetsType([IpamSubnetType(
-                                subnet=SubnetType(network, int(mask)))]))
         if properties:
+            if properties.get('gateway'):
+                ipam_subnet_type.default_gateway = properties.get('gateway')
             if properties.get('flood_unknown_unicast') == True:
                 vn_obj.flood_unknown_unicast = True
             vn_prop = VirtualNetworkType()
             if properties.get('forwarding_mode'):
                 vn_prop.set_forwarding_mode(properties.get('forwarding_mode'))
             vn_obj.set_virtual_network_properties(vn_prop)
+        vn_obj.add_network_ipam(NetworkIpam(), VnSubnetsType([ipam_subnet_type]))
         self.vnc_api_h.virtual_network_create(vn_obj)
         return vn_obj
 
@@ -168,6 +169,10 @@ class Client(object):
             self.vnc_api_h.virtual_machine_interface_delete(fq_name=fq_name)
         except NoIdError:
             pass
+
+    #@time_taken
+    def get_iip(self, uuid):
+        return self.vnc_api_h.instance_ip_read(id=uuid)
 
     #@time_taken
     def create_fip(self, name, port_obj, iip_obj, project_obj):
@@ -227,19 +232,18 @@ class Client(object):
 
 class PerVM(object):
     def __init__(self, name, tenant_name, auth_token, tenant_obj=None,
-                 tenant_vn_obj=None, tenant_sg_obj=None, image_id=None,
+                 port_objs=None, tenant_sg_obj=None, image_id=None,
                  flavor_id=None, vn_objs=None, private_networks=None,
                  ctrl_network=None, fabric_network=None,
                  metadata=None, personality=None):
         self.name = name
-        self.vm_name = name + '_unix'
+        self.fip_name = name + '_fip'
         self.t_port_name = name + '_tenant_port'
         self.c_port_name = name + '_ctrl_port'
         self.f_port_name = name + '_fabric_port'
-        self.fip_name = name + '_fip'
         self.tenant_name = tenant_name
         self.tenant_obj = tenant_obj
-        self.tenant_vn_obj = tenant_vn_obj
+        self.port_objs = port_objs
         self.tenant_sg_obj = tenant_sg_obj
         self.vn_objs = vn_objs
         self.image_id = image_id
@@ -253,16 +257,6 @@ class PerVM(object):
         if log:
             logging.basicConfig(filename=name+'.log', level=logging.DEBUG)
             self.log = logging.getLogger(name)
-
-    def create_tenant_port(self):
-        (port_obj, iip_obj) = self.client_h.create_port(self.t_port_name,
-                                                        self.tenant_vn_obj,
-                                                        self.tenant_sg_obj)
-        fip_obj = self.client_h.create_fip(self.fip_name,
-                                           port_obj,
-                                           iip_obj,
-                                           self.tenant_obj)
-        return port_obj.uuid
 
     def delete_tenant_port(self):
         self.client_h.delete_fip(self.fip_name)
@@ -304,7 +298,7 @@ class PerVM(object):
 
     def create_topology(self):
         try:
-            t_port_id = self.create_tenant_port()
+            t_port_id = self.port_objs[self.name].uuid
             nics = [t_port_id]
             if self.ctrl_network:
                 c_port_id = self.create_ctrl_port()
@@ -315,7 +309,7 @@ class PerVM(object):
             if self.private_networks:
                 p_port_ids = self.create_private_ports()
                 nics.extend(p_port_ids)
-            vm_obj = self.client_h.launch_vm(self.vm_name, nics,
+            vm_obj = self.client_h.launch_vm(self.name, nics,
                                              self.flavor_id, self.image_id,
                                              metadata=self.metadata,
                                              personality=self.personality)
@@ -325,7 +319,7 @@ class PerVM(object):
                 self.log.exception('Exception for instance'+self.name)
 
     def delete_topology(self):
-        self.client_h.delete_vm(self.vm_name)
+        self.client_h.delete_vm(self.name)
         self.delete_tenant_port()
         if self.ctrl_network:
             self.delete_ctrl_port()
@@ -335,13 +329,13 @@ class PerVM(object):
             self.delete_private_ports()
 
 class PerTenant(object):
-    def __init__(self, tenant_name, tenant_vn_cidr, instances, networks):
+    def __init__(self, tenant_name, instances, networks):
         self.tenant_name = tenant_name
-        self.tenant_vn = self.tenant_name+'_tenant_vn'
-        self.tenant_vn_cidr = tenant_vn_cidr
         self.instances = instances
         self.networks = networks
         self.vn_objs = dict()
+        self.port_objs = dict()
+        self.iip_objs = dict()
         self.vm_ids = list()
         self.active_vm_ids = list()
 
@@ -361,15 +355,46 @@ class PerTenant(object):
         #self.client_h = Client(self.tenant_name)
         self.tenant_id = self.client_h.tenant_id
         self.tenant_obj = self.client_h.get_project(str(uuid.UUID(self.tenant_id)))
-        self.tenant_vn_obj = self.client_h.create_network(self.tenant_vn,
-                                                          cidr=self.tenant_vn_cidr)
         for vn_name, vn_prop in self.networks.iteritems():
             self.vn_objs[vn_name] = self.client_h.create_network(
                                                  self.tenant_name+'_'+vn_name,
                                                  cidr=vn_prop['cidr'],
                                                  properties=vn_prop)
+        self.tenant_vn_obj = self.vn_objs['tenant']
         sg_id = self.tenant_obj.get_security_groups()[0]['uuid']
         self.tenant_sg_obj = self.client_h.get_security_group(sg_id)
+        for instance in self.instances:
+            inst_name = self.get_instance_name(instance)
+            fip_name = inst_name + '_fip'
+            t_port_name = inst_name + '_tenant_port'
+            (port_obj, iip_obj) = self.client_h.create_port(t_port_name,
+                                                            self.tenant_vn_obj,
+                                                            self.tenant_sg_obj)
+            fip_obj = self.client_h.create_fip(fip_name,
+                                               port_obj,
+                                               iip_obj,
+                                               self.tenant_obj)
+            self.port_objs[inst_name] = port_obj
+            self.iip_objs[inst_name] = iip_obj
+
+    def get_instance_name(self, instance):
+        name = instance['name'] if isinstance(instance, dict) else instance
+        return '.'.join([self.tenant_name, name])
+
+    def update_meta_refs(self):
+        for instance in self.instances:
+            metaref = dict()
+            for metakey, metaval in instance['metadata_refs'].iteritems():
+                if metakey.lower() == 're0_ip' or metakey.lower() == 're1_ip':
+                    iip_obj = self.iip_objs[self.get_instance_name(metaval)]
+                    if not iip_obj.get_instance_ip_address():
+                        iip_obj = self.client_h.get_iip(iip_obj.uuid)
+                        self.iip_objs[self.get_instance_name(metaval)] = iip_obj
+                    metaval = iip_obj.get_instance_ip_address()
+                metaref[metakey] = metaval
+            if 'metadata' not in instance:
+                instance['metadata'] = dict()
+            instance['metadata'].update(metaref)
 
     def launch_topo_wrapper(self):
         return self.launch_topo()
@@ -378,12 +403,13 @@ class PerTenant(object):
     def launch_topo(self):
         self.pre_conf()
         for instance in self.instances:
-            inst_name = '.'.join([self.tenant_name, instance['name']])
+            inst_name = self.get_instance_name(instance)
+            self.update_meta_refs()
             vm_id = PerVM(name=inst_name,
                           tenant_name=self.tenant_name,
                           auth_token=self.client_h.auth_token,
                           tenant_obj=self.tenant_obj,
-                          tenant_vn_obj=self.tenant_vn_obj,
+                          port_objs=self.port_objs,
                           tenant_sg_obj=self.tenant_sg_obj,
                           vn_objs=self.vn_objs,
                           image_id=instance['image'],
@@ -428,13 +454,12 @@ class PerTenant(object):
     @time_taken
     def delete_topo(self):
         for instance in self.instances:
-            inst_name = '.'.join([self.tenant_name, instance['name']])
+            inst_name = self.get_instance_name(instance)
             PerVM(name=inst_name, tenant_name=self.tenant_name,
                   private_networks=instance.get('private_networks'),
                   ctrl_network=instance.get('ctrl_network'),
                   fabric_network=instance.get('fabric_network'),
                   auth_token=self.client_h.auth_token).delete_topology()
-        self.client_h.delete_network(self.tenant_vn)
         for vn_name, vn_prop in self.networks.iteritems():
             self.client_h.delete_network(self.tenant_name+'_'+vn_name)
 
@@ -447,7 +472,7 @@ def main(templates, oper):
             except yaml.YAMLError as exc:
                 print exc
                 raise
-        pobjs.append(PerTenant(yargs['tenant_name'], yargs['tenant_cidr'], yargs['instances'],
+        pobjs.append(PerTenant(yargs['tenant_name'], yargs['instances'],
                               yargs['networks']))
     with futures.ProcessPoolExecutor(max_workers=64) as executor:
 #        pobjs[0].launch_topo()
