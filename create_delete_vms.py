@@ -23,7 +23,7 @@ DB_HOST='127.0.0.1'
 ADMIN_TENANT='admin'
 ADMIN_USERID='903db2adc51647e1ae2bd3a085ea91d0'
 ADMIN_ROLEID='cb2a02eadb194ebe966b426373c2d9b8'
-FIP_POOL_FQNAME='default-domain:admin:Public:floating-ip-pool'
+FIP_POOL_FQNAME='default-domain:demo:ext-net:public'
 log = True
 
 def time_taken(f):
@@ -219,6 +219,10 @@ class Client(object):
         self.nova_h.servers.delete(vm_id)
 
     #@time_taken
+    def get_network(self, vn_id=None, name=None):
+        if name:
+            fq_name = [OS_DOMAIN_NAME, self.tenant_name, name]
+            return self.vnc_api_h.virtual_network_read(fq_name=fq_name)
     def get_network(self, vn_id):
         return self.vnc_api_h.virtual_network_read(id=vn_id)
 
@@ -329,8 +333,9 @@ class PerVM(object):
             self.delete_private_ports()
 
 class PerTenant(object):
-    def __init__(self, tenant_name, instances, networks):
+    def __init__(self, tenant_name, tenant_vn_name, instances, networks):
         self.tenant_name = tenant_name
+        self.tenant_vn_name = tenant_vn_name
         self.instances = instances
         self.networks = networks
         self.vn_objs = dict()
@@ -360,7 +365,7 @@ class PerTenant(object):
                                                  self.tenant_name+'_'+vn_name,
                                                  cidr=vn_prop['cidr'],
                                                  properties=vn_prop)
-        self.tenant_vn_obj = self.vn_objs['tenant']
+        self.tenant_vn_obj = self.client_h.get_network(name=self.tenant_vn_name)
         sg_id = self.tenant_obj.get_security_groups()[0]['uuid']
         self.tenant_sg_obj = self.client_h.get_security_group(sg_id)
         for instance in self.instances:
@@ -472,8 +477,8 @@ def main(templates, oper):
             except yaml.YAMLError as exc:
                 print exc
                 raise
-        pobjs.append(PerTenant(yargs['tenant_name'], yargs['instances'],
-                              yargs['networks']))
+        pobjs.append(PerTenant(yargs['tenant_name'], yargs['tenant_vn_name'],
+                               yargs['instances'], yargs['networks']))
     with futures.ProcessPoolExecutor(max_workers=64) as executor:
 #        pobjs[0].launch_topo()
 #        fs = [executor.submit(pobj.launch_topo_wrapper) for pobj in pobjs]

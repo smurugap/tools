@@ -1,0 +1,186 @@
+tenant_name: scalTest-45
+tenant_vn_name: scalTest-45-net
+networks:
+    private1:
+       cidr: 192.168.10.0/24
+       forwarding_mode: l2
+       flood_unknown_unicast: True
+    private2:
+       cidr: 192.168.11.0/24
+       forwarding_mode: l2
+       flood_unknown_unicast: True
+    ctrl1:
+       cidr: 192.168.2.0/24
+       forwarding_mode: l2
+       flood_unknown_unicast: True
+    ctrl2:
+       cidr: 192.168.2.0/24
+       forwarding_mode: l2
+       flood_unknown_unicast: True
+    ctrl3:
+       cidr: 192.168.2.0/24
+       forwarding_mode: l2
+       flood_unknown_unicast: True
+    ctrl4:
+       cidr: 192.168.2.0/24
+       forwarding_mode: l2
+       flood_unknown_unicast: True
+    fabric1:
+       cidr: 192.168.3.0/24
+       forwarding_mode: l2
+       flood_unknown_unicast: True
+    fabric2:
+       cidr: 192.168.3.0/24
+       forwarding_mode: l2
+       flood_unknown_unicast: True
+    fabric3:
+       cidr: 192.168.3.0/24
+       forwarding_mode: l2
+       flood_unknown_unicast: True
+    fabric4:
+       cidr: 192.168.3.0/24
+       forwarding_mode: l2
+       flood_unknown_unicast: True
+instances:
+  - name: r1_re0
+    image: 5992c3fb-ac74-4ebf-98e2-d8e67249a028
+    flavor: ca9573a0-c973-458d-bced-8dfc96b08dcf
+    metadata_refs:
+       re0_ip: r1_re0
+       re1_ip: r1_re1
+    metadata:
+       gateway: 192.168.1.1
+       hostname: r1_re0
+       hw.pci.link.0x60.irq: 10
+       netmask: '24'
+       vm_chassis_i2cid: 33
+       vm_chassisname: r1
+       vm_chassname: r1
+       vm_i2cid: '0xBAB'
+       vm_instance: 0
+       vm_is_virtual: 1
+       vm_ore_present: 1
+       vm_retype: RE-VMX
+       vmtype: 0
+    personality:
+       /var/db/cumulus/baseline_config.template: /opt/juniper/cumulus/examples/vmxp2.base.systest.conf
+    ctrl_network: ctrl1
+  - name: r1_re1
+    image: 5992c3fb-ac74-4ebf-98e2-d8e67249a028
+    flavor: ca9573a0-c973-458d-bced-8dfc96b08dcf
+    metadata_refs:
+       re0_ip: r1_re0
+       re1_ip: r1_re1
+    metadata:
+       gateway: 192.168.1.1
+       hostname: r1_re1
+       hw.pci.link.0x60.irq: 10
+       netmask: '24'
+       vm_chassis_i2cid: 33
+       vm_chassisname: r1
+       vm_chassname: r1
+       vm_i2cid: '0xBAB'
+       vm_instance: 1
+       vm_is_virtual: 1
+       vm_ore_present: 1
+       vm_retype: RE-VMX
+       vmtype: 0
+    personality:
+       /var/db/cumulus/baseline_config.template: /opt/juniper/cumulus/examples/vmxp2.base.systest.conf
+    ctrl_network: ctrl1
+  - name: r1_fpc0
+    image: 5992c3fb-ac74-4ebf-98e2-d8e67249a028
+    flavor: ca9573a0-c973-458d-bced-8dfc96b08dcf
+    private_networks:
+       - private1
+       - private2
+    metadata_refs:
+       re0_ip: r1_fpc0
+    metadata:
+      boot_noveriexec: 'yes'
+      gateway: 192.168.1.1
+      hostname: r1_fpc0
+      hw.pci.link.0x60.irq: 10
+      netmask: '24'
+      vm_chassis_i2cid: 33
+      vm_chassname: r1
+      vm_i2cid: '0xBAA'
+      vm_instance: 0
+      vm_is_virtual: 1
+      vm_retype: RE-VMX
+      vmtype: 1
+    personality:
+      /var/db/cumulus/baseline_config.template: /opt/juniper/cumulus/examples/vmx.base.systest.conf
+    ctrl_network: ctrl1
+    fabric_network: fabric1
+  - name: r2_re0
+    image: 5992c3fb-ac74-4ebf-98e2-d8e67249a028
+    flavor: ca9573a0-c973-458d-bced-8dfc96b08dcf
+    metadata_refs:
+       re0_ip: r2_re0
+       re1_ip: r2_re1
+    metadata:
+       gateway: 192.168.1.1
+       hostname: r2_re0
+       hw.pci.link.0x60.irq: 10
+       netmask: '24'
+       vm_chassis_i2cid: 33
+       vm_chassisname: r2
+       vm_chassname: r2
+       vm_i2cid: '0xBAB'
+       vm_instance: 0
+       vm_is_virtual: 1
+       vm_ore_present: 1
+       vm_retype: RE-VMX
+       vmtype: 0
+    personality:
+       /var/db/cumulus/baseline_config.template: /opt/juniper/cumulus/examples/vmxp2.base.systest.conf
+    ctrl_network: ctrl2
+  - name: r2_re1
+    image: 5992c3fb-ac74-4ebf-98e2-d8e67249a028
+    flavor: ca9573a0-c973-458d-bced-8dfc96b08dcf
+    metadata_refs:
+       re0_ip: r2_re0
+       re1_ip: r2_re1
+    metadata:
+       gateway: 192.168.1.1
+       hostname: r2_re1
+       hw.pci.link.0x60.irq: 10
+       netmask: '24'
+       vm_chassis_i2cid: 33
+       vm_chassisname: r2
+       vm_chassname: r2
+       vm_i2cid: '0xBAB'
+       vm_instance: 1
+       vm_is_virtual: 1
+       vm_ore_present: 1
+       vm_retype: RE-VMX
+       vmtype: 0
+    personality:
+       /var/db/cumulus/baseline_config.template: /opt/juniper/cumulus/examples/vmxp2.base.systest.conf
+    ctrl_network: ctrl2
+  - name: r2_fpc0
+    image: 5992c3fb-ac74-4ebf-98e2-d8e67249a028
+    flavor: ca9573a0-c973-458d-bced-8dfc96b08dcf
+    private_networks:
+       - private1
+       - private2
+    metadata_refs:
+       re0_ip: r2_fpc0
+    metadata:
+      boot_noveriexec: 'yes'
+      gateway: 192.168.1.1
+      hostname: r2_fpc0
+      hw.pci.link.0x60.irq: 10
+      netmask: '24'
+      vm_chassis_i2cid: 33
+      vm_chassname: r2
+      vm_i2cid: '0xBAA'
+      vm_instance: 0
+      vm_is_virtual: 1
+      vm_retype: RE-VMX
+      vmtype: 1
+    personality:
+      /var/db/cumulus/baseline_config.template: /opt/juniper/cumulus/examples/vmx.base.systest.conf
+    ctrl_network: ctrl2
+    fabric_network: fabric2
