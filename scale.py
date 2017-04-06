@@ -25,6 +25,22 @@ except:
 from copy_reg import pickle
 from types import MethodType
 
+import threading
+import thread
+
+lock = dict()
+def get_lock(key):
+    global lock
+    if key not in lock.keys():
+        lock[key] = threading.Lock()
+    return lock[key]
+def _pickle_lock(lock):
+    return _unpickle_lock, (lock.__hash__(),)
+def _unpickle_lock(key):
+    return get_lock(key)
+pickle(thread.LockType, _pickle_lock, _unpickle_lock)
+
+
 def _pickle_method(method):
     func_name = method.im_func.__name__
     obj = method.im_self
@@ -391,8 +407,13 @@ class PerTenantWrapper(object):
                     self.obj.add_interface_router(rtr_name, vn_name)
 
             # Create Floating IP
+            port_ids = self.obj.id.port_id.values()
             for fip_index in range(index, index+self._args.n_fips):
                 self.obj.create_floatingip(self.admin_obj.ext_vn_uuid)
+                if fip_index < len(port_ids):
+                    port_id = port_ids[fip_index]
+                    fip_id = self.obj.id.fip_id[fip_index]
+                    self.obj.assoc_floatingip(fip_id, port_id)
 
             # Create virtual machines
             for vn_name in self.obj.id.vn_uuid.keys():
@@ -634,6 +655,10 @@ class Openstack(object):
         fip_dict = {'floating_network_id': ext_vn_uuid}
         response = self.neutron.create_floatingip({'floatingip': fip_dict})
         self.id.fip_id.append(response['floatingip']['id'])
+
+    def assoc_floatingip(self, fip_id, port_id):
+        fip_dict = {'floatingip': {'port_id': port_id}}
+        return self.neutron.update_floatingip(fip_id, fip_dict)
 
     def delete_floatingip(self, fip_id):
         ''' Delete FloatingIP '''
