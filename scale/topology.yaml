@@ -1,0 +1,33 @@
+projects:
+  project1:
+    count: 1
+    networks:
+      vn1:
+        count: 2
+        lr:
+          - lr1
+        bms:
+          - bms1
+          - bms2
+      vn2:
+        count: 2
+        lr:
+          - lr2
+    logical_routers:
+      lr1:
+        vni: 4000
+      lr2:
+        vni: 4001
+
+bms:
+  bms1:
+    interfaces:
+      - tor: 5c3-qfx11
+        pif: xe-0/0/3
+  bms2:
+    interfaces:
+      - tor: 5c2-qfx1
+        pif: "xe-0/0/11:0"
+spines:
+  - 5c3-qfx9
+  - 5c3-qfx8
