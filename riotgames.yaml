@@ -1,0 +1,20 @@
+api_server_ip: 10.84.29.31
+api_server_port: 8082
+auth_url: http://10.84.29.31:35357/v3
+username: admin
+password: c0ntrail123
+domain_name: Default
+project_name: admin
+image: a68f76a0-b5df-432a-9b67-2db8621d7528
+flavor: 16d1187f-2d95-4053-804d-557bdbe5c600
+
+networks:
+  client:
+    count: 1 #2000
+    firewall_rules: 1 #20
+    vms: 0.1
+  server:
+    count: 1 #10
+    firewall_rules: 10 #2000
+    vms: 1
+    start_port: 5000
