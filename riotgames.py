@@ -1,11 +1,7 @@
 import random
 import socket
 import struct
-import time
-import uuid
-import string
 from netaddr import *
-from datetime import datetime
 
 from novaclient import client as nova_client
 from keystoneclient import client as ks_client
@@ -20,7 +16,16 @@ import gevent
 
 alloc_addr_list = list()
 
-class ScaleTest(object):
+class Scale(object):
+    def __init__ (self, args):
+        self.client_h = Client(args)
+        self.networks = args.networks
+
+    def create(self):
+        for network in networks:
+            import pdb; pdb.set_trace()           
+
+class Client(object):
     def __init__ (self, args):
         auth = identity.v3.Password(auth_url=args.auth_url,
                                     username=args.username,
@@ -223,6 +228,9 @@ class ScaleTest(object):
         self.vnc.instance_ip_delete(fq_name=fq_name)
         self.vnc.virtual_machine_interfac_deletee(fq_name=fq_name)
 
+    def read_port(self, **kwargs):
+        return self.vnc.virtual_machine_interface_read(**kwargs)
+
     def create_router(self, fq_name, vns):
         obj = LogicalRouter(name=fq_name[-1], parent_type='project',
                             fq_name=fq_name,
@@ -266,6 +274,19 @@ class ScaleTest(object):
 #    def delete_vm(self, vm_obj):
 #        vm_obj.delete()
 
+    def get_vm_by_id(self, vm_id):
+        return self.nova.servers.get(vm_id)
+
+    def get_vmi_ip(self, **kwargs):
+        vmi_obj = self.read_port(**kwargs)
+        for iip in vmi_obj.get_instance_ip_back_refs() or []:
+            iip_obj = self.vnc.instance_ip_read(id=iip['uuid'])
+            return iip_obj.instance_ip_address
+
+    def get_vm_node(self, vm_id):
+        vm_obj = self.get_vm_by_id(vm_id)
+        return vm_obj.__dict__['OS-EXT-SRV-ATTR:hypervisor_hostname']
+
 def get_random_cidr(mask=28):
     ''' Generate random non-overlapping cidr '''
     global alloc_addr_list
@@ -289,9 +310,6 @@ def parse_cli(args):
     pargs = parser.parse_args(args)
     return pargs
 
-def random_string(prefix):
-    return prefix+''.join(random.choice(string.hexdigits) for _ in range(4))
-
 def main(template, oper):
     with open(template, 'r') as fd:
         try:
@@ -300,7 +318,7 @@ def main(template, oper):
             print exc
             raise
     pargs = argparse.Namespace(**yargs)
-    obj = ScaleTest(pargs)
+    obj = Scale(pargs)
     if oper.lower().startswith('del'):
         obj.delete()
     elif oper.lower() == 'add':
