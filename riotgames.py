@@ -12,18 +12,319 @@ import yaml
 import argparse
 import sys
 import re
-import gevent
+import time
+from fabutils import *
 
 alloc_addr_list = list()
+
+import gevent
+from gevent import monkey, Greenlet
+monkey.patch_all()
+
+class SafeList(list):
+    def get(self, index, default=None):
+        try:
+            return super(SafeList, self).__getitem__(index)
+        except IndexError:
+            return default
+
+def exec_in_parallel(functions_and_args):
+    # Pass in Functions, args and kwargs in the below format
+    # exec_in_parallel([(self.test, (val1, val2), {key3: val3})])
+    greenlets = list()
+    for fn_and_arg in functions_and_args:
+        instance = SafeList(fn_and_arg)
+        fn = instance[0]
+        args = instance.get(1, set())
+        kwargs = instance.get(2, dict())
+        greenlets.append(Greenlet.spawn(fn, *args, **kwargs))
+        gevent.sleep(0)
+    return greenlets
+
+def get_results(greenlets, raise_exception=True):
+    outputs = list()
+    results = list()
+    for greenlet in greenlets:
+        results.extend(gevent.joinall([greenlet]))
+    for result in results:
+        try:
+            outputs.append(result.get())
+        except:
+            if raise_exception:
+                raise
+            outputs.append(None)
+    return outputs
 
 class Scale(object):
     def __init__ (self, args):
         self.client_h = Client(args)
-        self.networks = args.networks
+        self.args = args
+        self.ntierapp = list()
+        self.server = self.client = None
+        for name, profile in args.networks.items():
+            if profile['mode'] == 'server':
+                self.server = name
+            elif profile['mode'] == 'client':
+                self.client = name
+            else:
+                self.ntierapp.append(name)
+        self.start_port = getattr(args, 'start_port', 5000)
+        self.threads = int(getattr(args, 'threads', 1))
+        self.vns = dict()
+        self.vms = dict()
+
+    def get_fqname(self, prefix, index):
+        return ['default-domain', self.args.project_name, prefix+'-'+str(index)]
+
+    def get_sec_fqname(self, prefix, index=None):
+        name = prefix+'-'+str(index) if index else prefix
+        return ['default-policy-management', name]
+
+    def get_port(self, index):
+        return (self.start_port+index, self.start_port+index)
+
+    def create_logical_routers(self, name, index):
+        if self.client == name:
+            vn_fqname = self.get_fqname(self.client, index)
+            server_count = self.args.networks[self.server]['count']
+            for i in range(server_count):
+                svn_fqname = self.get_fqname(self.server, i)
+                lr_fqname = self.get_fqname(vn_fqname[-1], i)
+                self.client_h.create_router(lr_fqname, [vn_fqname, svn_fqname])
+
+    def delete_logical_routers(self, name, index):
+        if self.client == name:
+            vn_fqname = self.get_fqname(self.client, index)
+            server_count = self.args.networks[self.server]['count']
+            for i in range(server_count):
+                svn_fqname = self.get_fqname(self.server, i)
+                lr_fqname = self.get_fqname(vn_fqname[-1], i)
+                self.client_h.delete_router(lr_fqname, [vn_fqname, svn_fqname])
+
+    def get_rules(self, name, index):
+        rules = list()
+        if self.client == name:
+            server_count = self.args.networks[self.server]['count']
+            for i in range(server_count):
+                rule = dict()
+                rule['dports'] = self.get_port(i)
+                rule['protocol'] = 'tcp'
+                rule['action'] = 'pass'
+                rule['source'] = {'virtual_network': ':'.join(self.get_fqname(self.client, index))}
+                rule['destination'] = {'virtual_network': ':'.join(self.get_fqname(self.server, i))}
+                rules.append(rule)
+        elif self.server == name:
+            client_count = self.args.networks[self.client]['count']
+            for i in range(client_count):
+                rule = dict()
+                rule['dports'] = self.get_port(index)
+                rule['protocol'] = 'tcp'
+                rule['action'] = 'pass'
+                rule['source'] = {'virtual_network': ':'.join(self.get_fqname(self.client, i))}
+                rule['destination'] = {'virtual_network': ':'.join(self.get_fqname(self.server, index))}
+                rules.append(rule)
+        return rules
+
+    def get_dummy_rules(self, start, end):
+        rules = list()
+        subnet = get_random_cidr(mask=30)
+        for i in range(start, end):
+            rule = dict()
+            rule['dports'] = (65000 - i, 65000 - i)
+            rule['sports'] = (65000 - i, 65000 - i)
+            rule['protocol'] = 'udp'
+            rule['action'] = 'pass'
+            rule['destination'] = {'subnet': subnet}
+            rule['source'] = {'subnet': subnet}
+            rules.append(rule)
+        return rules
+
+    def get_greenlet_args_list(self, fn, name, profile):
+        count = int(profile.get('count', 1))
+        n_vms = int(float(profile.get('vms', 1)) * count)
+        total_vms = 0
+        start = 0
+        each = count/self.threads
+        greenlet_args_list = list()
+        for thread in range(self.threads):
+            end = start + each
+            if end + each > count:
+                end = count
+            kwargs = {'name': name, 'profile': profile}
+            kwargs['start'] = start
+            kwargs['end'] = end
+            kwargs['n_vms'] = each if n_vms - each*(thread+1) >= 0 else 0
+            total_vms = total_vms + kwargs['n_vms']
+            if kwargs['n_vms'] == 0 and total_vms < n_vms:
+                kwargs['n_vms'] = n_vms - total_vms
+                total_vms = total_vms + kwargs['n_vms']
+            start = end
+            greenlet_args_list.append((fn, set(), kwargs))
+        return greenlet_args_list
+
+    def start_traffic(self):
+        #Get all VM objects
+        for name, profile in self.args.networks.items():
+            fn_and_args = self.get_greenlet_args_list(self.get_vm_details, name, profile)
+            greenlets = exec_in_parallel(fn_and_args)
+            get_results(greenlets, raise_exception=True)
+        #Start servers
+        if self.server:
+            profile = self.args.networks[self.server]
+            for i in range(profile['count']):
+                port = list(self.get_port(i))[0]
+                vn_fqname = self.get_fqname(self.server, i)
+                vm = self.vms[vn_fqname[-1]]
+                vm.start_traffic('tcp', port, mode='server')
+                print (vm.vmi_fqname, vm.vm_node_ip, vm.local_ip)
+        #Start clients
+        if self.client:
+            cprofile = self.args.networks[self.client]
+            sprofile = self.args.networks[self.server]
+            n_vms = int(float(cprofile.get('vms', 1)) * cprofile['count'])
+            vms = 0
+            for cindex in range(cprofile['count']):
+                if vms >= n_vms:
+                    break
+                cvn_fqname = self.get_fqname(self.client, cindex)
+                cvm = self.vms[cvn_fqname[-1]]
+                for sindex in range(sprofile['count']):
+                    port = list(self.get_port(sindex))[0]
+                    svn_fqname = self.get_fqname(self.server, sindex)
+                    svm = self.vms[svn_fqname[-1]]
+                    cvm.start_traffic('tcp', port, mode='client', server=svm.vm_ip)
+                vms = vms+1
+
+    def stop_traffic(self):
+        #Get all VM objects
+        for name, profile in self.args.networks.items():
+            fn_and_args = self.get_greenlet_args_list(self.get_vm_details, name, profile)
+            greenlets = exec_in_parallel(fn_and_args)
+            get_results(greenlets, raise_exception=True)
+        #Poll clients
+        if self.client:
+            cprofile = self.args.networks[self.client]
+            sprofile = self.args.networks[self.server]
+            n_vms = int(float(cprofile.get('vms', 1)) * cprofile['count'])
+            vms = 0
+            for cindex in range(cprofile['count']):
+                if vms >= n_vms:
+                    break
+                cvn_fqname = self.get_fqname(self.client, cindex)
+                cvm = self.vms[cvn_fqname[-1]]
+                for sindex in range(sprofile['count']):
+                    port = list(self.get_port(sindex))[0]
+                    svn_fqname = self.get_fqname(self.server, sindex)
+                    svm = self.vms[svn_fqname[-1]]
+                    sent, recv = cvm.stop_traffic('tcp', port, server=svm.vm_ip)
+                    if sent - recv > 1:
+                        print 'Drops: %s - Client: %s - Server: %s'%(sent-recv,
+                            cvn_fqname[-1], svn_fqname[-1])
+                vms = vms+1
+
+    def poll_traffic(self):
+        #Get all VM objects
+        for name, profile in self.args.networks.items():
+            fn_and_args = self.get_greenlet_args_list(self.get_vm_details, name, profile)
+            greenlets = exec_in_parallel(fn_and_args)
+            get_results(greenlets, raise_exception=True)
+        #Poll clients
+        if self.client:
+            cprofile = self.args.networks[self.client]
+            sprofile = self.args.networks[self.server]
+            n_vms = int(float(cprofile.get('vms', 1)) * cprofile['count'])
+            vms = 0
+            for cindex in range(cprofile['count']):
+                if vms >= n_vms:
+                    break
+                cvn_fqname = self.get_fqname(self.client, cindex)
+                cvm = self.vms[cvn_fqname[-1]]
+                for sindex in range(sprofile['count']):
+                    port = list(self.get_port(sindex))[0]
+                    svn_fqname = self.get_fqname(self.server, sindex)
+                    svm = self.vms[svn_fqname[-1]]
+                    sent, recv = cvm.poll_traffic('tcp', port, server=svm.vm_ip)
+                    if sent - recv > 1:
+                        print 'Drops: %s - Client: %s - Server: %s'%(sent-recv,
+                            cvn_fqname[-1], svn_fqname[-1])
+                    sent2, recv2 = cvm.poll_traffic('tcp', port, server=svm.vm_ip)
+                    if sent2 == sent:
+                        print 'traffic stopped - Client: %s - Server: %s'%(sent-recv,
+                            cvn_fqname[-1], svn_fqname[-1])
+                vms = vms+1
+
+    def get_vm_details(self, name, profile, start, end, n_vms, **kwargs):
+        count_vms = 0
+        for i in range(start, end):
+            vn_fqname = self.get_fqname(name, i)
+            if count_vms < n_vms:
+                self.vms[vn_fqname[-1]] = VM(vn_fqname, self.client_h)
+                count_vms = count_vms + 1
+                self.vms[vn_fqname[-1]].vm_ip, self.vms[vn_fqname[-1]].local_ip
 
     def create(self):
-        for network in networks:
-            import pdb; pdb.set_trace()           
+        for name, profile in self.args.networks.items():
+            fn_and_args = self.get_greenlet_args_list(self._create, name, profile)
+            greenlets = exec_in_parallel(fn_and_args)
+            get_results(greenlets, raise_exception=True)
+
+        for name, profile in self.args.networks.items():
+            for i in range(profile['count']):
+                self.create_logical_routers(name, i)
+
+    def _create(self, name, profile, start, end, n_vms, **kwargs):
+        count_vms = 0
+        for i in range(start, end):
+            vn_fqname = self.get_fqname(name, i)
+            self.vns[vn_fqname[-1]] = self.client_h.create_vn(vn_fqname)
+            vn_obj = self.client_h.read_vn(fq_name=vn_fqname)
+            if count_vms < n_vms:
+                port_obj = self.client_h.create_port(vn_fqname, vn_obj)
+                self.client_h.create_vm(vn_fqname[-1], port_obj.uuid)
+                count_vms = count_vms + 1
+            self.client_h.create_tag(vn_fqname[-1:], 'application', vn_fqname[-1])
+            self.client_h.set_tag('application', vn_fqname[-1], 'virtual_network',
+                                  vn_fqname)
+            rules = self.get_rules(name, i)[:profile['rule_count']]
+            rules.extend(self.get_dummy_rules(len(rules), profile['rule_count']))
+            fw_rules = list()
+            for rindex, rule in enumerate(rules):
+                fwr = self.client_h.create_firewall_rule(
+                    self.get_sec_fqname(vn_fqname[-1], rindex),
+                        **rule)
+                fw_rules.append({'seq_no': rindex, 'uuid': fwr})
+            fwp = self.client_h.create_firewall_policy(
+                self.get_sec_fqname(vn_fqname[-1]),
+                rules=fw_rules)
+            aps = self.client_h.create_application_policy_set(
+                self.get_sec_fqname(vn_fqname[-1]),
+                policies=[{'uuid': fwp, 'seq_no': 1}])
+            self.client_h.set_tag('application', vn_fqname[-1],
+                'application-policy-set',
+                 self.get_sec_fqname(vn_fqname[-1]))
+
+    def delete(self):
+        for name, profile in self.args.networks.items():
+            for i in range(profile['count']):
+                self.delete_logical_routers(name, i)
+        for name, profile in self.args.networks.items():
+            fn_and_args = self.get_greenlet_args_list(self._delete, name, profile)
+            greenlets = exec_in_parallel(fn_and_args)
+            get_results(greenlets, raise_exception=True)
+
+    def _delete(self, name, profile, start, end, n_vms, **kwargs):
+        count_vms = 0
+        for i in range(start, end):
+            vn_fqname = self.get_fqname(name, i)
+            if count_vms < n_vms:
+                self.client_h.delete_vm(vn_fqname)
+                count_vms = count_vms + 1
+            self.client_h.delete_application_policy_set(self.get_sec_fqname(vn_fqname[-1]))
+            self.client_h.delete_firewall_policy(self.get_sec_fqname(vn_fqname[-1]))
+            for index in range(profile['rule_count']):
+                self.client_h.delete_firewall_rule(self.get_sec_fqname(vn_fqname[-1], index))
+            self.client_h.delete_vn(vn_fqname)
+            self.client_h.delete_tag(vn_fqname[-1:], 'application')
 
 class Client(object):
     def __init__ (self, args):
@@ -45,12 +346,12 @@ class Client(object):
             auth_host = match.group(2)
             auth_port = match.group(3)
 
-        self.vnc_h = VncApi(username=args.username,
-                            password=args.password,
-                            tenant_name=args.project_name,
-                            domain_name=domain_name,
-                            api_server_host=args.api_server_ip,
-                            auth_host=auth_host)
+        self.vnc = VncApi(username=args.username,
+                          password=args.password,
+                          tenant_name=args.project_name,
+                          domain_name=domain_name,
+                          api_server_host=args.api_server_ip,
+                          auth_host=auth_host)
         self.flavor = args.flavor
         self.image = args.image
 
@@ -70,9 +371,12 @@ class Client(object):
         return self.vnc.virtual_network_read(fq_name=fq_name)
 
     def delete_vn(self, fq_name):
-        self.vnc.virtual_network_delete(fq_name=fq_name)
+        try:
+            self.vnc.virtual_network_delete(fq_name=fq_name)
+        except NoIdError:
+            pass
 
-    def create_application_policy_set(self, fq_name, policies=None)
+    def create_application_policy_set(self, fq_name, policies=None):
         obj = ApplicationPolicySet(fq_name[-1], fq_name=fq_name,
                                    parent_type='policy-management')
         for policy in policies or []:
@@ -82,7 +386,10 @@ class Client(object):
         return self.vnc.application_policy_set_create(obj)
 
     def delete_application_policy_set(self, fq_name):
-        return self.vnc.application_policy_set_delete(fq_name=fq_name)
+        try:
+            self.vnc.application_policy_set_delete(fq_name=fq_name)
+        except NoIdError:
+            pass
 
     def create_firewall_policy(self, fq_name, rules=None):
         obj = FirewallPolicy(fq_name[-1], fq_name=fq_name,
@@ -94,7 +401,10 @@ class Client(object):
         return self.vnc.firewall_policy_create(obj)
 
     def delete_firewall_policy(self, fq_name):
-        return self.vnc.firewall_policy_delete(fq_name=fq_name)
+        try:
+            self.vnc.firewall_policy_delete(fq_name=fq_name)
+        except NoIdError:
+            pass
 
     def read_firewall_policy(self, **kwargs):
         return self.vnc.firewall_policy_read(**kwargs)
@@ -116,7 +426,6 @@ class Client(object):
             self,
             fq_name,
             action=None,
-            direction=None,
             protocol=None,
             sports=None,
             dports=None,
@@ -149,8 +458,7 @@ class Client(object):
             service = FirewallServiceType(protocol=protocol or 'any',
                                           src_ports=PortType(*sports),
                                           dst_ports=PortType(*dports))
-        if match:
-            match = FirewallRuleMatchTagsType(tag_list=match)
+        match = FirewallRuleMatchTagsType(tag_list=[])
         obj = FirewallRule(fq_name[-1],
                            fq_name=fq_name,
                            parent_type='policy-management',
@@ -162,7 +470,10 @@ class Client(object):
         return self.vnc.firewall_rule_create(obj)
 
     def delete_firewall_rule(self, fq_name):
-        return self.vnc.firewall_rule_delete(fq_name=fq_name)
+        try:
+            self.vnc.firewall_rule_delete(fq_name=fq_name)
+        except NoIdError:
+            pass
 
     def read_firewall_rule(self, **kwargs):
         return self.vnc.firewall_rule_read(**kwargs)
@@ -195,14 +506,19 @@ class Client(object):
                   parent_type=parent_type, fq_name=fq_name, **kwargs)
         return self.vnc.tag_create(obj)
 
-    def delete_tag(self, fq_name):
-        return self.vnc.tag_delete(fq_name=fq_name)
+    def delete_tag(self, fq_name, tag_type=None):
+        if tag_type:
+            fq_name[-1] = tag_type+"="+fq_name[-1]
+        try:
+            self.vnc.tag_delete(fq_name=fq_name)
+        except NoIdError:
+            pass
 
     def read_tag(self, **kwargs):
         return self.vnc.tag_read(**kwargs)
 
     def _get_obj(self, object_type, fq_name):
-        api = ('self._vnc.' + object_type + '_read').replace('-', '_')
+        api = ('self.vnc.' + object_type + '_read').replace('-', '_')
         return eval(api)(fq_name=fq_name)
 
     def set_tag(self, tag_type, tag_value, object_type, fq_name):
@@ -213,10 +529,18 @@ class Client(object):
         obj = self._get_obj(object_type, fq_name)
         return self.vnc.unset_tag(obj, tag_type)
 
+    def check_and_create_port(self, fq_name, vn_obj, device_owner=None):
+        try:
+            return self.read_port(fq_name=fq_name)
+        except NoIdError:
+            return self.create_port(fq_name, vn_obj, device_owner=None)
+
     def create_port(self, fq_name, vn_obj, device_owner=None):
         port_obj = VirtualMachineInterface(fq_name[-1],
             fq_name=fq_name, parent_type='project')
         port_obj.add_virtual_network(vn_obj)
+        if device_owner:
+            port_obj.set_virtual_machine_interface_device_owner(device_owner)
         self.vnc.virtual_machine_interface_create(port_obj)
         iip_obj = InstanceIp(name=fq_name[-1])
         iip_obj.add_virtual_network(vn_obj)
@@ -225,8 +549,14 @@ class Client(object):
         return port_obj
 
     def delete_port(self, fq_name):
-        self.vnc.instance_ip_delete(fq_name=fq_name)
-        self.vnc.virtual_machine_interfac_deletee(fq_name=fq_name)
+        try:
+            self.vnc.instance_ip_delete(fq_name=fq_name[-1:])
+        except NoIdError:
+            pass
+        try:
+            self.vnc.virtual_machine_interface_delete(fq_name=fq_name)
+        except NoIdError:
+            pass
 
     def read_port(self, **kwargs):
         return self.vnc.virtual_machine_interface_read(**kwargs)
@@ -236,41 +566,59 @@ class Client(object):
                             fq_name=fq_name,
                             logical_router_type='snat-routing')
         for vn in vns:
-            import pdb; pdb.set_trace()
             vn_obj = self.read_vn(fq_name=vn)
             ipam_refs = vn_obj.get_network_ipam_refs()
             for ipam_ref in ipam_refs or []:
                 subnet = ipam_ref['attr'].get_ipam_subnets()[0]
                 gateway = subnet.default_gateway
                 break
-            port_fq_name = vn_obj.fq_name
+            port_fq_name = list(vn_obj.fq_name)
             port_fq_name[-1] = port_fq_name[-1]+'-rtr-vmi'
-            port_obj = self.create_port(fq_name=port_fq_name,
-                vn=vn_obj, device_owner="network:router_interface")
+            port_obj = self.check_and_create_port(port_fq_name,
+                vn_obj, device_owner="network:router_interface")
             obj.add_virtual_machine_interface(port_obj)
         uuid = self.vnc.logical_router_create(obj)
         return uuid
 
     def delete_router(self, fq_name, vns):
+        try:
+            self.vnc.logical_router_delete(fq_name=fq_name)
+        except NoIdError:
+            pass
         for vn in vns:
-            import pdb; pdb.set_trace()
-            vn_obj = self.read_vn(fq_name=vn)
+            try:
+                vn_obj = self.read_vn(fq_name=vn)
+            except NoIdError:
+                continue
             port_fq_name = vn_obj.fq_name
             port_fq_name[-1] = port_fq_name[-1]+'-rtr-vmi'
-            #obj.add_virtual_machine_interface(port_obj)
-            self.delete_port(fq_name=fq_name)
-        self.vnc.logical_router_delete(fq_name=fq_name)
+            try:
+                self.delete_port(fq_name=port_fq_name)
+            except RefsExistError:
+                continue
 
-    def create_vm(self, vm_name, vn_uuid):
-        nics = [{'net-id': vn_uuid}]
+    def create_vm(self, vm_name, port_id):
+        nics = [{'port-id': port_id}]
         response = self.nova.servers.create(name=vm_name,
                                             flavor=self.flavor,
                                             image=self.image,
                                             nics=nics)
 
-    def delete_vm(self, vm_name):
-        import pdb; pdb.set_trace()
-        self.nova.servers.delete(name=vm_name)
+    def delete_vm(self, vmi_fqname):
+        try:
+            vm_id = self.get_vm_id(vmi_fqname)
+            if vm_id:
+                self.nova.servers.delete(vm_id)
+                #obj = self.get_vm_by_id(vm_id)
+                #obj.delete()
+            for i in range(10):
+                try:
+                    self.delete_port(vmi_fqname)
+                    break
+                except RefsExistError:
+                    time.sleep(2)
+        except NoIdError:
+            pass
 #    def delete_vm(self, vm_obj):
 #        vm_obj.delete()
 
@@ -282,6 +630,11 @@ class Client(object):
         for iip in vmi_obj.get_instance_ip_back_refs() or []:
             iip_obj = self.vnc.instance_ip_read(id=iip['uuid'])
             return iip_obj.instance_ip_address
+
+    def get_vm_id(self, vmi_fqname):
+        vmi_obj = self.read_port(fq_name=vmi_fqname)
+        for ref in vmi_obj.get_virtual_machine_refs() or []:
+            return ref['uuid']
 
     def get_vm_node(self, vm_id):
         vm_obj = self.get_vm_by_id(vm_id)
@@ -323,10 +676,15 @@ def main(template, oper):
         obj.delete()
     elif oper.lower() == 'add':
         obj.create()
+    elif oper.lower() == 'start':
+        obj.start_traffic()
+    elif oper.lower() == 'poll':
+        obj.poll_traffic()
+    elif oper.lower() == 'stop':
+        obj.stop_traffic()
     else:
         raise Exception()
 
 if __name__ == '__main__':
     pargs = parse_cli(sys.argv[1:])
-    import pdb; pdb.set_trace()
     main(pargs.template, pargs.oper)

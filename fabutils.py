@@ -35,22 +35,35 @@ class AgentInspect(object):
 
     def get_local_ip(self, vmi_id):
         response = self.get('Snh_ItfReq?uuid=%s'%vmi_id)
-        intf_list = vnl.xpath('./ItfResp/itf_list/list/ItfSandeshData') or \
-                    vnl.xpath('./itf_list/list/ItfSandeshData')
-        import pdb; pdb.set_trace()
+        intf_list = response.xpath('./ItfResp/itf_list/list/ItfSandeshData') or \
+                    response.xpath('./itf_list/list/ItfSandeshData')
         for intf in intf_list:
             for e in intf:  # intf replaces avn[0]
-                p[e.tag] = e.text
-                return e.text
+                if e.tag == 'mdata_ip_addr':
+                    return e.text
 
 class VM(object):
-    def __init__(self, vm_id, vmi_id, client_h):
-        self.vm_id = vm_id
-        self.vmi_id = vmi_id
+    def __init__(self, vmi_fqname, client_h):
+        self.vmi_fqname = vmi_fqname
         self.client_h = client_h
+        self._vm_id = None
+        self._vmi_id = None
         self._vm_node_ip = None
         self._local_ip = None
         self._vm_ip = None
+
+    @property
+    def vm_id(self):
+        if not self._vm_id:
+            self._vm_id = self.client_h.get_vm_id(self.vmi_fqname)
+        return self._vm_id
+
+    @property
+    def vmi_id(self):
+        if not self._vmi_id:
+            port_obj = self.client_h.read_port(fq_name=self.vmi_fqname)
+            self._vmi_id = port_obj.uuid
+        return self._vmi_id
 
     @property
     def vm_node_ip(self):
@@ -68,10 +81,10 @@ class VM(object):
     @property
     def vm_ip(self):
         if not self._vm_ip:
-            self._vm_ip = self.client_h.get_vmi_ip(vmi_id=self.vmi_id)
+            self._vm_ip = self.client_h.get_vmi_ip(id=self.vmi_id)
         return self._vm_ip
 
-    def run_cmd_on_vm(self, cmd, as_sudo=True,
+    def run_cmd_on_vm(self, cmd, as_sudo=False,
                       as_daemon=False, pidfile=None):
         '''run cmds on VM
 
@@ -86,7 +99,7 @@ class VM(object):
         return output
 
     def copy_file_to_vm(self, localfile):
-        dest_dir = '%s@%s:%s' % (VM_USERNAME, self.local_ip, '')
+        dest_dir = '%s@%s:/tmp/%s' % (VM_USERNAME, self.local_ip, os.path.basename(localfile))
         dest_gw_login = "%s@%s" % (HOST_USERNAME, self.vm_node_ip)
         remote_copy(localfile, dest_dir, dest_password=VM_PASSWORD,
                     dest_gw=dest_gw_login, dest_gw_password=HOST_PASSWORD)
@@ -96,10 +109,10 @@ class VM(object):
         pid_file = '/tmp/%s-%s-%s.pid'%(server or 'server', protocol, port)
         stats_file = '/tmp/%s-%s-%s.stats'%(server or 'server', protocol, port)
         log_file = '/tmp/%s-%s-%s.log'%(server or 'server', protocol, port)
-        if proto.lower() == 'tcp':
+        if protocol.lower() == 'tcp':
             server_script = TCPSERVER
             client_script = TCPCLIENT
-        elif proto.lower() == 'udp':
+        elif protocol.lower() == 'udp':
             server_script = UDPSERVER
             client_script = UDPCLIENT
         if mode == 'server':
@@ -107,27 +120,28 @@ class VM(object):
                   port, port, pid_file, stats_file)
             cmd = 'python /tmp/%s %s'%(os.path.basename(server_script), cmd)
             cmd = cmd + ' 0<&- &> %s'%log_file
-            self.copy_file_to_vm(server_script, '/tmp/')
-            self.run_cmd_on_vm(cmd, as_sudo=True, as_daemon=True)
+            #self.copy_file_to_vm(server_script)
+            self.run_cmd_on_vm(cmd, as_sudo=False, as_daemon=True)
         elif mode == 'client':
             cmd = '--servers %s --dports %s --slow --pid_file %s --stats_file %s'%(
                   server, port, pid_file, stats_file)
             cmd = 'python /tmp/%s %s'%(os.path.basename(client_script), cmd)
             cmd = cmd + ' 0<&- &> %s'%log_file
-            self.copy_file_to_vm(self.client_script, '/tmp/')
-            self.run_cmd_on_vm(cmd, as_sudo=True, as_daemon=False)
+            #self.copy_file_to_vm(client_script)
+            self.run_cmd_on_vm(cmd, as_sudo=False, as_daemon=False)
 
     def get_stats(self, protocol, port, server=None, poll=True):
-        if poll is True:
-            signal = '-USR1'
+        signal = '-USR1' if poll is True else ''
         pid_file = '/tmp/%s-%s-%s.pid'%(server or 'server', protocol, port)
         stats_file = '/tmp/%s-%s-%s.stats'%(server or 'server', protocol, port)
         log_file = '/tmp/%s-%s-%s.log'%(server or 'server', protocol, port)
         cmd = 'kill %s $(cat %s); sync; cat %s'%(signal, pid_file, stats_file)
-        output = vm.run_cmd_on_vm(cmd, as_sudo=True)
+        output = self.run_cmd_on_vm(cmd, as_sudo=False)
+        if poll is False:
+            self.run_cmd_on_vm('rm %s %s'%(pid_file, stats_file), as_sudo=False)
         pattern = 'dport: (?P<dport>\d+) -.* ip: (?P<ip>.*) - ' \
                    + 'sent: (?P<sent>\d+) - recv: (?P<recv>\d+)'
-        stats = [m.groupdict() for m in re.finditer(pattern, output[cmd] or [])]
+        stats = [m.groupdict() for m in re.finditer(pattern, output or [])]
         sent = sum([int(d['sent']) for d in stats])
         recv = sum([int(d['recv']) for d in stats])
         return (sent, recv)
@@ -142,8 +156,6 @@ def remote_cmd(host_string, cmd, password=None, gateway=None,
                as_daemon=False, gateway_password=None):
     if as_daemon:
         cmd = 'nohup ' + cmd + ' & '
-        if pidfile:
-            cmd = '%s echo $! > %s' % (cmd, pidfile)
     (username, host_ip) = host_string.split('@')
     shell = '/bin/sh -l -c'
     with settings(
@@ -153,8 +165,9 @@ def remote_cmd(host_string, cmd, password=None, gateway=None,
             warn_only=True,
             disable_known_hosts=True,
             abort_on_prompts=False):
+      with hide('everything'):
         update_env_passwords(host_string, password, gateway, gateway_password)
-        output = sudo(cmd, timeout=60, pty=not as_daemon, shell=shell)
+        output = run(cmd, timeout=60, pty=not as_daemon, shell=shell)
         real_output = remove_unwanted_output(output)
         return real_output
 
@@ -209,6 +222,7 @@ def remote_copy(src, dest, src_password=None, src_gw=None, src_gw_password=None,
     else:
         raise AttributeError("Invalid source path - %s" % src)
 
+    import pdb; pdb.set_trace()
     if src_node:
         # Source is remote
         with settings(host_string=src_node, gateway=src_gw,
@@ -239,6 +253,7 @@ def remote_copy(src, dest, src_password=None, src_gw=None, src_gw_password=None,
                       abort_on_prompts=False):
             update_env_passwords(dest_node, dest_password, dest_gw, dest_gw_password)
             try:
+                print src_path, dest_path
                 put(src_path, dest_path, use_sudo=True)
                 return True
             except NetworkError:

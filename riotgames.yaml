@@ -5,23 +5,28 @@ username: admin
 password: c0ntrail123
 domain_name: Default
 project_name: admin
-image: a68f76a0-b5df-432a-9b67-2db8621d7528
-flavor: 16d1187f-2d95-4053-804d-557bdbe5c600
+image: 59a7abf0-f6d4-4bb5-8a18-b16366aff9cd
+flavor: daf0af13-f7f4-41c2-a9ec-b1e2f360f63e
+
+threads: 10
+start_port: 5000
 
 networks:
   client:
-    count: 1 #2000
-    firewall_rules: 1 #20
-    vms: 0.1
+    mode: client
+    count: 2000
+    rule_count: 20 #20
+    vms: 0.05
     traffic:
-       mode: client
-       start_port: 5000
-       end_port: 5010
+      - mode: client
+        start_port: 5000
+        end_port: 5010
   server:
-    count: 1 #10
-    firewall_rules: 10 #2000
+    mode: server
+    count: 10
+    rule_count: 2000
     vms: 1
     traffic:
-       mode: server
+     - mode: server
        start_port: 5000
        end_port: 5010
