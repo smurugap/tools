@@ -1,6 +1,7 @@
 import random
 import socket
 import struct
+import uuid
 from netaddr import *
 
 from novaclient import client as nova_client
@@ -59,17 +60,22 @@ class Scale(object):
     def __init__ (self, args):
         self.client_h = Client(args)
         self.args = args
-        self.ntierapp = list()
         self.server = self.client = None
+        self.app_vns = list()
+        self.service_vns = list()
         for name, profile in args.networks.items():
             if profile['mode'] == 'server':
                 self.server = name
             elif profile['mode'] == 'client':
                 self.client = name
-            else:
-                self.ntierapp.append(name)
+            elif profile['mode'] == 'service':
+                self.service_vns.append(name)
+            elif profile['mode'] == 'application':
+                self.app_vns.append(name)
+        self.use_lr = getattr(args, 'use_logical_routers', False)
         self.start_port = getattr(args, 'start_port', 5000)
         self.threads = int(getattr(args, 'threads', 1))
+        self.asn = getattr(args, 'asn', 64512)
         self.vns = dict()
         self.vms = dict()
 
@@ -100,6 +106,30 @@ class Scale(object):
                 svn_fqname = self.get_fqname(self.server, i)
                 lr_fqname = self.get_fqname(vn_fqname[-1], i)
                 self.client_h.delete_router(lr_fqname, [vn_fqname, svn_fqname])
+
+    def get_peer_rt(self, name, index):
+        import_rt_list = []
+        if self.client == name:
+            server_rt_start = self.args.networks[self.server]['rt_start']
+            server_count = self.args.networks[self.server]['count']
+            for i in range(server_count):
+                import_rt_list.append('target:%s:%s'%(self.asn, 
+                                      int(server_rt_start) + i))
+        elif self.server == name:
+            client_rt_start = self.args.networks[self.client]['rt_start']
+            client_count = self.args.networks[self.client]['count']
+            for i in range(client_count):
+                import_rt_list.append('target:%s:%s'%(self.asn, 
+                                      int(client_rt_start) + i))
+        return import_rt_list
+
+#    def exchange_route_targets(self, name, index):
+#        if self.client == name:
+#            vn_fqname = self.get_fqname(self.client, index)
+#            server_count = self.args.networks[self.server]['count']
+#            for i in range(server_count):
+#                svn_fqname = self.get_fqname(self.server, i)
+#                self.client_h.exchange_rt(vn_fqname, svn_fqname)
 
     def get_rules(self, name, index):
         rules = list()
@@ -162,6 +192,56 @@ class Scale(object):
             greenlet_args_list.append((fn, set(), kwargs))
         return greenlet_args_list
 
+    def custom(self, custom_cmd):
+        #Get all VM objects
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                vn_fqname = self.get_fqname(name, i)
+                self.vms[vn_fqname[-1]] = VM(vn_fqname, self.client_h)
+                vm = self.vms[vn_fqname[-1]]
+                print 'VM - %s - %s'%(vm.local_ip, vm.vm_node_ip)
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                fab_connections.clear()
+                vn_fqname = self.get_fqname(name, i)
+                vm = self.vms[vn_fqname[-1]]
+                print vm.run_cmd_on_vm(custom_cmd)
+                print 'VM - %s - %s - %s - %s'%(vm.local_ip, vm.vm_node_ip, vm.vm_ip, vn_fqname[-1])
+        '''
+        #Start servers
+        if self.server:
+            profile = self.args.networks[self.server]
+            for i in range(profile['count']):
+                fab_connections.clear()
+                port = list(self.get_port(i))[0]
+                vn_fqname = self.get_fqname(self.server, i)
+                vm = self.vms[vn_fqname[-1]]
+                print 'Server VM - %s - %s'%(vm.local_ip, vm.vm_node_ip)
+                try:
+                    print vm.run_cmd_on_vm(custom_cmd)
+                except:
+                    pass
+                print '\n'
+        #Start clients
+        if self.client:
+            cprofile = self.args.networks[self.client]
+            n_vms = int(float(cprofile.get('vms', 1)) * cprofile['count'])
+            vms = 0
+            for cindex in range(cprofile['count']):
+                fab_connections.clear()
+                if vms >= n_vms:
+                    break
+                vms = vms+1
+                cvn_fqname = self.get_fqname(self.client, cindex)
+                cvm = self.vms[cvn_fqname[-1]]
+                print 'Client VM - %s - %s'%(cvm.local_ip, cvm.vm_node_ip)
+                try:
+                    print cvm.run_cmd_on_vm(custom_cmd)
+                except:
+                    pass
+                print '\n'
+        '''
+
     def start_traffic(self):
         #Get all VM objects
         for name, profile in self.args.networks.items():
@@ -172,11 +252,12 @@ class Scale(object):
         if self.server:
             profile = self.args.networks[self.server]
             for i in range(profile['count']):
+                fab_connections.clear()
                 port = list(self.get_port(i))[0]
                 vn_fqname = self.get_fqname(self.server, i)
                 vm = self.vms[vn_fqname[-1]]
+                print 'Server VM - %s - %s'%(vm.local_ip, vm.vm_node_ip)
                 vm.start_traffic('tcp', port, mode='server')
-                print (vm.vmi_fqname, vm.vm_node_ip, vm.local_ip)
         #Start clients
         if self.client:
             cprofile = self.args.networks[self.client]
@@ -184,16 +265,18 @@ class Scale(object):
             n_vms = int(float(cprofile.get('vms', 1)) * cprofile['count'])
             vms = 0
             for cindex in range(cprofile['count']):
+                fab_connections.clear()
                 if vms >= n_vms:
                     break
+                vms = vms+1
                 cvn_fqname = self.get_fqname(self.client, cindex)
                 cvm = self.vms[cvn_fqname[-1]]
+                print 'Client VM - %s - %s'%(cvm.local_ip, cvm.vm_node_ip)
                 for sindex in range(sprofile['count']):
                     port = list(self.get_port(sindex))[0]
                     svn_fqname = self.get_fqname(self.server, sindex)
                     svm = self.vms[svn_fqname[-1]]
                     cvm.start_traffic('tcp', port, mode='client', server=svm.vm_ip)
-                vms = vms+1
 
     def stop_traffic(self):
         #Get all VM objects
@@ -208,8 +291,10 @@ class Scale(object):
             n_vms = int(float(cprofile.get('vms', 1)) * cprofile['count'])
             vms = 0
             for cindex in range(cprofile['count']):
+                fab_connections.clear()
                 if vms >= n_vms:
                     break
+                vms = vms+1
                 cvn_fqname = self.get_fqname(self.client, cindex)
                 cvm = self.vms[cvn_fqname[-1]]
                 for sindex in range(sprofile['count']):
@@ -220,7 +305,6 @@ class Scale(object):
                     if sent - recv > 1:
                         print 'Drops: %s - Client: %s - Server: %s'%(sent-recv,
                             cvn_fqname[-1], svn_fqname[-1])
-                vms = vms+1
 
     def poll_traffic(self):
         #Get all VM objects
@@ -235,8 +319,10 @@ class Scale(object):
             n_vms = int(float(cprofile.get('vms', 1)) * cprofile['count'])
             vms = 0
             for cindex in range(cprofile['count']):
+                fab_connections.clear()
                 if vms >= n_vms:
                     break
+                vms = vms+1
                 cvn_fqname = self.get_fqname(self.client, cindex)
                 cvm = self.vms[cvn_fqname[-1]]
                 for sindex in range(sprofile['count']):
@@ -244,14 +330,17 @@ class Scale(object):
                     svn_fqname = self.get_fqname(self.server, sindex)
                     svm = self.vms[svn_fqname[-1]]
                     sent, recv = cvm.poll_traffic('tcp', port, server=svm.vm_ip)
+                    print sent, recv, cvm.vm_ip, svm.vm_ip
                     if sent - recv > 1:
-                        print 'Drops: %s - Client: %s - Server: %s'%(sent-recv,
+                        print 'ERROR: Drops: %s - Client: %s - Server: %s'%(sent-recv,
                             cvn_fqname[-1], svn_fqname[-1])
                     sent2, recv2 = cvm.poll_traffic('tcp', port, server=svm.vm_ip)
                     if sent2 == sent:
-                        print 'traffic stopped - Client: %s - Server: %s'%(sent-recv,
+                        time.sleep(1)
+                        sent2, recv2 = cvm.poll_traffic('tcp', port, server=svm.vm_ip)
+                        if sent2 == sent:
+                          print 'ERROR: Traffic stopped - Client: %s - Server: %s'%(
                             cvn_fqname[-1], svn_fqname[-1])
-                vms = vms+1
 
     def get_vm_details(self, name, profile, start, end, n_vms, **kwargs):
         count_vms = 0
@@ -260,7 +349,321 @@ class Scale(object):
             if count_vms < n_vms:
                 self.vms[vn_fqname[-1]] = VM(vn_fqname, self.client_h)
                 count_vms = count_vms + 1
-                self.vms[vn_fqname[-1]].vm_ip, self.vms[vn_fqname[-1]].local_ip
+
+    def _get_rules(self, rules, name, index):
+        rules_list = list()
+        if name in self.service_vns:
+            min_index = 0
+            max_index = self.args.networks[self.app_vns[0]]['count']
+        else:
+            min_index = index
+            max_index = index + 1
+        for index in range(min_index, max_index):
+            for rule in rules:
+                dct = dict()
+                if 'dst_vn' in rule:
+                    if rule['dst_vn'] in self.service_vns:
+                        dct['dst_vn'] = self.get_fqname(rule['dst_vn'], 0)
+                    else:
+                        dct['dst_vn'] = self.get_fqname(rule['dst_vn'], index)
+                else:
+                    if name in self.service_vns:
+                        dct['dst_vn'] = self.get_fqname(name, 0)
+                    else:
+                        dct['dst_vn'] = self.get_fqname(name, index)
+                if 'src_vn' in rule:
+                    if rule['src_vn'] in self.service_vns:
+                        dct['src_vn'] = self.get_fqname(rule['src_vn'], 0)
+                    else:
+                        dct['src_vn'] = self.get_fqname(rule['src_vn'], index)
+                else:
+                    if name in self.service_vns:
+                        dct['src_vn'] = self.get_fqname(name, 0)
+                    else:
+                        dct['src_vn'] = self.get_fqname(name, index)
+                dct['port'] = rule['port']
+                rules_list.append(dct)
+        return rules_list
+
+    def pre_start_traffic(self):
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                vn_fqname = self.get_fqname(name, i)
+                self.vms[vn_fqname[-1]] = VM(vn_fqname, self.client_h)
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                fab_connections.clear()
+                vn_fqname = self.get_fqname(name, i)
+                rules = profile['rules'] + profile.get('traffic', [])
+                servers = [rule for rule in rules if 'src_vn' in rule or 
+                           ('dst_vn' not in rule and 'src_vn' not in rule)]
+                vm = self.vms[vn_fqname[-1]]
+                for traffic in servers:
+                    vm.start_traffic('tcp', traffic['port'], mode='server')
+                print 'VM - %s - %s'%(vm.local_ip, vm.vm_node_ip)
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                fab_connections.clear()
+                vn_fqname = self.get_fqname(name, i)
+                rules = profile['rules'] + profile.get('traffic', [])
+                clients = [rule for rule in rules if 'dst_vn' in rule]
+                vm = self.vms[vn_fqname[-1]]
+                if name in self.service_vns:
+                    min_index = 0
+                    max_index = self.args.networks[self.app_vns[0]]['count']
+                else:
+                    min_index = i
+                    max_index = i + 1
+                for index in range(min_index, max_index):
+                  for traffic in clients:
+                    rindex = index
+                    if traffic['dst_vn'] in self.service_vns:
+                        rindex = 0
+                    dvm = self.vms[self.get_fqname(traffic['dst_vn'], rindex)[-1]]
+                    vm.start_traffic('tcp', traffic['port'], mode='client', server=dvm.vm_ip)
+                vm = self.vms[vn_fqname[-1]]
+                print 'VM - %s - %s - %s - %s'%(vm.local_ip, vm.vm_node_ip, vm.vm_ip, vn_fqname[-1])
+
+    def poll_migrate_traffic(self):
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                vn_fqname = self.get_fqname(name, i)
+                self.vms[vn_fqname[-1]] = VM(vn_fqname, self.client_h)
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                fab_connections.clear()
+                vn_fqname = self.get_fqname(name, i)
+                rules = profile['rules']
+                clients = [rule for rule in rules if 'dst_vn' in rule]
+                vm = self.vms[vn_fqname[-1]]
+                if name in self.service_vns:
+                    min_index = 0
+                    max_index = self.args.networks[self.app_vns[0]]['count']
+                else:
+                    min_index = i
+                    max_index = i + 1
+                for index in range(min_index, max_index):
+                  for traffic in clients:
+                    if traffic['dst_vn'] in self.service_vns:
+                        index = 0
+                    dvm = self.vms[self.get_fqname(traffic['dst_vn'], index)[-1]]
+                    sent, recv = vm.poll_traffic('tcp', traffic['port'], server=dvm.vm_ip)
+                    print sent, recv, vm.vm_ip, dvm.vm_ip, vn_fqname[-1], dvm.vmi_fqname[-1]
+                    if sent - recv > 1:
+                        print 'ERROR: Drops: %s - Client: %s - Server: %s'%(sent-recv,
+                            vn_fqname[-1], self.get_fqname(traffic['dst_vn'], index)[-1])
+                    sent2, recv2 = vm.poll_traffic('tcp', traffic['port'], server=dvm.vm_ip)
+                    if sent2 == sent:
+                        time.sleep(1)
+                        sent2, recv2 = vm.poll_traffic('tcp', traffic['port'], server=dvm.vm_ip)
+                        if sent2 == sent:
+                          print 'ERROR: Traffic stopped - Client: %s - Server: %s'%(
+                            vn_fqname[-1], self.get_fqname(traffic['dst_vn'], index)[-1])
+
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                fab_connections.clear()
+                vn_fqname = self.get_fqname(name, i)
+                rules = profile.get('traffic', [])
+                clients = [rule for rule in rules if 'dst_vn' in rule]
+                vm = self.vms[vn_fqname[-1]]
+                for traffic in clients:
+                    index = i
+                    if traffic['dst_vn'] in self.service_vns:
+                        index = 0
+                    dvm = self.vms[self.get_fqname(traffic['dst_vn'], index)[-1]]
+                    sent, recv = vm.poll_traffic('tcp', traffic['port'], server=dvm.vm_ip)
+                    print sent, recv, vm.vm_ip, dvm.vm_ip
+                    if recv:
+                        print 'ERROR: Negative: recv: %s - Client: %s - Server: %s'%(recv,
+                            vn_fqname[-1], self.get_fqname(traffic['dst_vn'], index)[-1])
+
+                vm = self.vms[vn_fqname[-1]]
+                print 'VM - %s - %s - %s - %s'%(vm.local_ip, vm.vm_node_ip, vm.vm_ip, vn_fqname[-1])
+
+    def recreate_np(self):
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                vn_fqname = self.get_fqname(name, i)
+                self.client_h.delete_network_policy(vn_fqname)
+                rules = self._get_rules(profile['rules'], name, i)
+                self.client_h.create_network_policy(vn_fqname, rules)
+
+    def exchange_rt(self):
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                vn_fqname = self.get_fqname(name, i)
+                rt = profile['rt_start'] + i
+                vn_obj = self.client_h.read_vn(vn_fqname)
+                vn_rt = RouteTargetList()
+                new_rt = 'target:%s:%s'%(self.asn, rt)
+                if new_rt not in vn_rt.route_target:
+                    vn_rt.add_route_target(new_rt)
+                    vn_obj.set_route_target_list(vn_rt)
+                    self.client_h.vnc.virtual_network_update(vn_obj)
+        import pdb; pdb.set_trace() #Fix Me - ServiceNetwork
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                vn_fqname = self.get_fqname(name, i)
+                vn_obj = self.client_h.read_vn(vn_fqname)
+                vn_rt = RouteTargetList()
+                peers = [rule.get('src_vn') or rule.get('dst_vn') for rule in profile['rules']]
+                for peer in peers:
+                    if peer in self.service_vns:
+                        peer_rt = self.args.networks[peer]['rt_start'] + 0
+                    else:
+                        peer_rt = self.args.networks[peer]['rt_start'] + i
+                    rt = 'target:%s:%s'%(self.asn, peer_rt)
+                    if rt not in vn_rt.route_target:
+                        vn_rt.add_route_target(rt)
+                vn_obj.set_import_route_target_list(vn_rt)
+                self.client_h.vnc.virtual_network_update(vn_obj)
+
+    def get_migrate_fw_rules(self, name, index):
+        rule_list = list()
+        rules = self.args.networks[name]['rules']
+        if name in self.service_vns:
+            min_index = 0
+            max_index = self.args.networks[self.app_vns[0]]['count']
+        else:
+            min_index = index
+            max_index = index + 1
+        for index in range(min_index, max_index):
+            for rule in rules:
+                dct = dict()
+                dct['dports'] = (rule['port'], rule['port'])
+                dct['protocol'] = 'tcp'
+                dct['action'] = 'pass'
+                if 'dst_vn' in rule:
+                    if rule['dst_vn'] in self.service_vns:
+                        destination = self.get_fqname(rule['dst_vn'], 0)
+                    else:
+                        destination = self.get_fqname(rule['dst_vn'], index)
+                else:
+                    if name in self.service_vns:
+                        destination = self.get_fqname(name, 0)
+                    else:
+                        destination = self.get_fqname(name, index)
+                if 'src_vn' in rule:
+                    if rule['src_vn'] in self.service_vns:
+                        source = self.get_fqname(rule['src_vn'], 0)
+                    else:
+                        source = self.get_fqname(rule['src_vn'], index)
+                else:
+                    if name in self.service_vns:
+                        source = self.get_fqname(name, 0)
+                    else:
+                        source = self.get_fqname(name, index)
+                dct['source'] = {'virtual_network': ':'.join(source)}
+                dct['destination'] = {'virtual_network': ':'.join(destination)}
+                rule_list.append(dct)
+        return rule_list
+
+    def rollback_migrate_application_networks(self):
+        for name, profile in self.args.networks.items():
+            if name not in self.app_vns:
+                continue
+            for i in range(profile.get('count', 1)):
+                vn_fqname = self.get_fqname(name, i)
+                self.client_h.delete_application_policy_set(self.get_sec_fqname(vn_fqname[-1]))
+                self.client_h.delete_firewall_policy(self.get_sec_fqname(vn_fqname[-1]))
+                for index in range(len(profile.get('rules', []))):
+                    self.client_h.delete_firewall_rule(self.get_sec_fqname(vn_fqname[-1], index))
+
+    def migrate_application_networks(self, index):
+        for name, profile in self.args.networks.items():
+            if name not in self.app_vns:
+                continue
+            for i in range(profile.get('count', 1)):
+                if index is not None and i != int(index):
+                    continue
+                vn_fqname = self.get_fqname(name, i)
+                self.client_h.check_and_create_tag(vn_fqname[-1:], 'application', vn_fqname[-1])
+                self.client_h.set_tag('application', vn_fqname[-1],
+                    'virtual_network', vn_fqname)
+                rules = self.get_migrate_fw_rules(name, i)
+                fw_rules = list()
+                for rindex, rule in enumerate(rules):
+                    fwr = self.client_h.create_firewall_rule(
+                        self.get_sec_fqname(vn_fqname[-1], rindex), **rule)
+                    fw_rules.append({'seq_no': rindex, 'uuid': fwr})
+                fwp = self.client_h.create_firewall_policy(
+                    self.get_sec_fqname(vn_fqname[-1]),
+                    rules=fw_rules)
+                aps = self.client_h.create_application_policy_set(
+                    self.get_sec_fqname(vn_fqname[-1]),
+                    policies=[{'uuid': fwp, 'seq_no': 5}])
+                self.client_h.set_tag('application', vn_fqname[-1],
+                    'application-policy-set',
+                     self.get_sec_fqname(vn_fqname[-1]))
+        self.migrate_delete_np(index)
+
+    def migrate_service_networks(self, index):
+        for name, profile in self.args.networks.items():
+            if name not in self.service_vns:
+                continue
+            for i in range(profile.get('count', 1)):
+                if index is not None and i != int(index):
+                    continue
+                vn_fqname = self.get_fqname(name, i)
+                self.client_h.check_and_create_tag(vn_fqname[-1:],
+                    'application', vn_fqname[-1])
+                self.client_h.set_tag('application', vn_fqname[-1],
+                    'virtual_network', vn_fqname)
+                rules = self.get_migrate_fw_rules(name, i)
+                fw_rules = list()
+                for rindex, rule in enumerate(rules):
+                    fwr = self.client_h.create_firewall_rule(
+                        self.get_sec_fqname(vn_fqname[-1], rindex), **rule)
+                    fw_rules.append({'seq_no': rindex, 'uuid': fwr})
+                fwp = self.client_h.create_firewall_policy(
+                    self.get_sec_fqname(vn_fqname[-1]),
+                    rules=fw_rules)
+                aps = self.client_h.create_application_policy_set(
+                    self.get_sec_fqname(vn_fqname[-1]),
+                    policies=[{'uuid': fwp, 'seq_no': 5}])
+                self.client_h.set_tag('application', vn_fqname[-1],
+                    'application-policy-set',
+                     self.get_sec_fqname(vn_fqname[-1]))
+
+    def migrate_delete_service_np(self, index=0):
+        for name, profile in self.args.networks.items():
+            if name not in self.service_vns:
+                continue
+            for i in range(profile.get('count', 1)):
+                if index is not None and i != int(index):
+                    continue
+                vn_fqname = self.get_fqname(name, i)
+                self.client_h.delete_network_policy(vn_fqname)
+
+    def migrate_delete_np(self, index):
+        for name, profile in self.args.networks.items():
+            if name not in self.app_vns:
+                continue
+            for i in range(profile.get('count', 1)):
+                if index is not None and i != int(index):
+                    continue
+                vn_fqname = self.get_fqname(name, i)
+                self.client_h.delete_network_policy(vn_fqname)
+
+    def pre_create(self):
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                vn_fqname = self.get_fqname(name, i)
+                self.client_h.create_vn(vn_fqname)
+                vn_obj = self.client_h.read_vn(fq_name=vn_fqname)
+                port_obj = self.client_h.create_port(vn_fqname, vn_obj)
+                self.client_h.create_vm(vn_fqname[-1], port_obj.uuid)
+                rules = self._get_rules(profile['rules'], name, i)
+                self.client_h.create_network_policy(vn_fqname, rules)
+
+    def pre_delete(self):
+        for name, profile in self.args.networks.items():
+            for i in range(profile.get('count', 1)):
+                vn_fqname = self.get_fqname(name, i)
+                self.client_h.delete_vm(vn_fqname)
+                self.client_h.delete_network_policy(vn_fqname)
+                self.client_h.delete_vn(vn_fqname)
 
     def create(self):
         for name, profile in self.args.networks.items():
@@ -268,15 +671,21 @@ class Scale(object):
             greenlets = exec_in_parallel(fn_and_args)
             get_results(greenlets, raise_exception=True)
 
-        for name, profile in self.args.networks.items():
-            for i in range(profile['count']):
-                self.create_logical_routers(name, i)
+        if self.use_lr is True:
+            for name, profile in self.args.networks.items():
+                for i in range(profile['count']):
+                    self.create_logical_routers(name, i)
+#                else:
+#                    self.exchange_route_targets(name, i)
 
     def _create(self, name, profile, start, end, n_vms, **kwargs):
         count_vms = 0
         for i in range(start, end):
             vn_fqname = self.get_fqname(name, i)
-            self.vns[vn_fqname[-1]] = self.client_h.create_vn(vn_fqname)
+            rt = int(profile['rt_start']) + i
+            peer_rt_list = self.get_peer_rt(name, i)
+            self.vns[vn_fqname[-1]] = self.client_h.create_vn(
+                        vn_fqname, self.asn, rt, peer_rt_list)
             vn_obj = self.client_h.read_vn(fq_name=vn_fqname)
             if count_vms < n_vms:
                 port_obj = self.client_h.create_port(vn_fqname, vn_obj)
@@ -304,9 +713,10 @@ class Scale(object):
                  self.get_sec_fqname(vn_fqname[-1]))
 
     def delete(self):
-        for name, profile in self.args.networks.items():
-            for i in range(profile['count']):
-                self.delete_logical_routers(name, i)
+        if self.use_lr is True:
+            for name, profile in self.args.networks.items():
+                for i in range(profile['count']):
+                    self.delete_logical_routers(name, i)
         for name, profile in self.args.networks.items():
             fn_and_args = self.get_greenlet_args_list(self._delete, name, profile)
             greenlets = exec_in_parallel(fn_and_args)
@@ -355,7 +765,7 @@ class Client(object):
         self.flavor = args.flavor
         self.image = args.image
 
-    def create_vn(self, fq_name):
+    def create_vn(self, fq_name, asn=None, rt=None, peer_rt_list=None):
         mask = 29
         cidr = get_random_cidr(mask=mask).split('/')[0]
         vn_name = fq_name[-1]
@@ -364,6 +774,11 @@ class Client(object):
         vn_obj.add_network_ipam(NetworkIpam(),
                                 VnSubnetsType([IpamSubnetType(
                                 subnet=SubnetType(cidr, mask))]))
+        if rt and asn:
+            vn_obj.set_route_target_list(RouteTargetList(
+                route_target=['target:%s:%s'%(asn, rt)]))
+            vn_obj.set_import_route_target_list(RouteTargetList(
+                route_target=peer_rt_list))
         vn_id = self.vnc.virtual_network_create(vn_obj)
         return vn_id
 
@@ -375,6 +790,59 @@ class Client(object):
             self.vnc.virtual_network_delete(fq_name=fq_name)
         except NoIdError:
             pass
+
+    def create_network_policy(self, fq_name, rules):
+        def _get_rule(src_vn, dst_vn, dport):
+            src_addr = AddressType(virtual_network=':'.join(src_vn))
+            dst_addr = AddressType(virtual_network=':'.join(dst_vn))
+            return PolicyRuleType(rule_uuid=str(uuid.uuid4()),
+                                  rule_sequence=SequenceType(major=-1, minor=-1),
+                                  direction="<>", protocol='tcp',
+                                  src_addresses=[src_addr],
+                                  dst_addresses=[dst_addr],
+                                  dst_ports=[PortType(dport, dport)],
+                                  src_ports=[PortType(-1, -1)],
+                                  action_list=ActionListType(apply_service=None,
+                                                          simple_action='pass'))
+        rules_list = list()
+        for rule in rules:
+            rules_list.append(_get_rule(rule['src_vn'], rule['dst_vn'],
+                dport=rule['port']))
+        policy = NetworkPolicy(fq_name[-1], parent_type='project',
+            fq_name=fq_name,
+            network_policy_entries=PolicyEntriesType(rules_list))
+        policy_id = self.vnc.network_policy_create(policy)
+        network_obj = self.vnc.virtual_network_read(fq_name=fq_name)
+        network_obj.add_network_policy(policy,
+            VirtualNetworkPolicyType(sequence=SequenceType(major=0, minor=0)))
+        self.vnc.virtual_network_update(network_obj)
+
+    def delete_network_policy(self, fq_name):
+        try:
+            policy_obj = self.vnc.network_policy_read(fq_name=fq_name)
+            network_obj = self.vnc.virtual_network_read(fq_name=fq_name)
+            network_obj.del_network_policy(policy_obj)
+            self.vnc.virtual_network_update(network_obj)
+        except NoIdError:
+            pass
+        try:
+            self.vnc.network_policy_delete(fq_name=fq_name)
+        except NoIdError:
+            pass
+
+#    def exchange_rt(self, vn1_fqname, vn2_fqname):
+#        vn1_obj = self.read_vn(vn1_fqname)
+#        vn2_obj = self.read_vn(vn2_fqname)
+#        vn1_rt = vn1_obj.get_route_target_list().get_route_target()[0]
+#        vn2_rt = vn2_obj.get_route_target_list().get_route_target()[0]
+#        vn1_import_rt_list = vn1_obj.get_import_route_target_list() or RouteTargetList()
+#        vn2_import_rt_list = vn2_obj.get_import_route_target_list() or RouteTargetList()
+#        vn1_import_rt_list.add_route_target(vn2_rt)
+#        vn2_import_rt_list.add_route_target(vn1_rt)
+#        vn1_obj.set_import_route_target_list(vn1_import_rt_list)
+#        vn2_obj.set_import_route_target_list(vn2_import_rt_list)
+#        self.vnc.virtual_network_update(vn1_obj)
+#        self.vnc.virtual_network_update(vn2_obj)
 
     def create_application_policy_set(self, fq_name, policies=None):
         obj = ApplicationPolicySet(fq_name[-1], fq_name=fq_name,
@@ -484,10 +952,7 @@ class Client(object):
             return self.create_tag(fq_name, tag_type, tag_value,
                                    parent_type=None, **kwargs)
         except RefsExistError:
-            fqname = ['%s=%s' % (tag_type, tag_value)]
-            if parent_type == 'project':
-                fqname = fq_name[:-1] + fqname
-            return self.read_tag(fq_name=fqname).uuid
+            pass
 
     def create_tag(
             self,
@@ -546,6 +1011,7 @@ class Client(object):
         iip_obj.add_virtual_network(vn_obj)
         iip_obj.add_virtual_machine_interface(port_obj)
         self.vnc.instance_ip_create(iip_obj)
+        print port_obj.uuid
         return port_obj
 
     def delete_port(self, fq_name):
@@ -577,8 +1043,7 @@ class Client(object):
             port_obj = self.check_and_create_port(port_fq_name,
                 vn_obj, device_owner="network:router_interface")
             obj.add_virtual_machine_interface(port_obj)
-        uuid = self.vnc.logical_router_create(obj)
-        return uuid
+        return self.vnc.logical_router_create(obj)
 
     def delete_router(self, fq_name, vns):
         try:
@@ -640,18 +1105,26 @@ class Client(object):
         vm_obj = self.get_vm_by_id(vm_id)
         return vm_obj.__dict__['OS-EXT-SRV-ATTR:hypervisor_hostname']
 
+def is_valid_address(address):
+    ''' Validate whether the address provided is routable unicast address '''
+    addr = IPAddress(address)
+    if addr.is_loopback() or addr.is_reserved() or addr.is_private()\
+       or addr.is_link_local() or addr.is_multicast():
+        return False
+    return True
+
 def get_random_cidr(mask=28):
     ''' Generate random non-overlapping cidr '''
     global alloc_addr_list
     address = socket.inet_ntop(socket.AF_INET,
                                struct.pack('>I',
                                random.randint(2**24, 2**32 - 2**29 - 1)))
-    address = str(IPNetwork(address+'/'+str(mask)).network)
-    if address.startswith('169.254') or address in alloc_addr_list:
+    addr = str(IPNetwork(address+'/'+str(mask)).network)
+    if not is_valid_address(address) or addr in alloc_addr_list:
         cidr = get_random_cidr()
     else:
-        alloc_addr_list.append(address)
-        cidr = address+'/'+str(mask)
+        alloc_addr_list.append(addr)
+        cidr = addr+'/'+str(mask)
     return cidr
 
 def parse_cli(args):
@@ -660,10 +1133,14 @@ def parse_cli(args):
                         help='location of the yaml template files')
     parser.add_argument('-o', '--oper', default='add',
                         help='Operation to perform (add/delete)')
+    parser.add_argument('-c', '--custom-cmd',
+                        help='Any custom command to execute on VMs')
+    parser.add_argument('-i', '--index',
+                        help='index of the application vn to migrate')
     pargs = parser.parse_args(args)
     return pargs
 
-def main(template, oper):
+def main(template, oper, custom_cmd, index):
     with open(template, 'r') as fd:
         try:
             yargs = yaml.load(fd)
@@ -678,13 +1155,22 @@ def main(template, oper):
         obj.create()
     elif oper.lower() == 'start':
         obj.start_traffic()
+    elif oper.lower() == 'custom':
+        obj.custom(custom_cmd)
     elif oper.lower() == 'poll':
         obj.poll_traffic()
     elif oper.lower() == 'stop':
         obj.stop_traffic()
+    elif oper.lower() == 'migrate_application_networks':
+        obj.migrate_application_networks(index)
+    elif oper.lower() == 'migrate_service_networks':
+        obj.migrate_service_networks(index)
+    elif getattr(obj, oper.lower(), None):
+        fn = getattr(obj, oper.lower())
+        fn()
     else:
         raise Exception()
 
 if __name__ == '__main__':
     pargs = parse_cli(sys.argv[1:])
-    main(pargs.template, pargs.oper)
+    main(pargs.template, pargs.oper, pargs.custom_cmd, pargs.index)

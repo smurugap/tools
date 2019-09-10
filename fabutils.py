@@ -120,15 +120,13 @@ class VM(object):
                   port, port, pid_file, stats_file)
             cmd = 'python /tmp/%s %s'%(os.path.basename(server_script), cmd)
             cmd = cmd + ' 0<&- &> %s'%log_file
-            #self.copy_file_to_vm(server_script)
-            self.run_cmd_on_vm(cmd, as_sudo=False, as_daemon=True)
+            self.run_cmd_on_vm(cmd, as_daemon=True)
         elif mode == 'client':
-            cmd = '--servers %s --dports %s --slow --pid_file %s --stats_file %s'%(
+            cmd = '--servers %s --dports %s --retry --slow --pid_file %s --stats_file %s'%(
                   server, port, pid_file, stats_file)
             cmd = 'python /tmp/%s %s'%(os.path.basename(client_script), cmd)
-            cmd = cmd + ' 0<&- &> %s'%log_file
-            #self.copy_file_to_vm(client_script)
-            self.run_cmd_on_vm(cmd, as_sudo=False, as_daemon=False)
+            cmd = cmd + ' 0<&- &> %s'%log_file+';ps ax'
+            self.run_cmd_on_vm(cmd)
 
     def get_stats(self, protocol, port, server=None, poll=True):
         signal = '-USR1' if poll is True else ''
@@ -141,7 +139,7 @@ class VM(object):
             self.run_cmd_on_vm('rm %s %s'%(pid_file, stats_file), as_sudo=False)
         pattern = 'dport: (?P<dport>\d+) -.* ip: (?P<ip>.*) - ' \
                    + 'sent: (?P<sent>\d+) - recv: (?P<recv>\d+)'
-        stats = [m.groupdict() for m in re.finditer(pattern, output or [])]
+        stats = [m.groupdict() for m in re.finditer(pattern, output or '')]
         sent = sum([int(d['sent']) for d in stats])
         recv = sum([int(d['recv']) for d in stats])
         return (sent, recv)
@@ -167,7 +165,7 @@ def remote_cmd(host_string, cmd, password=None, gateway=None,
             abort_on_prompts=False):
       with hide('everything'):
         update_env_passwords(host_string, password, gateway, gateway_password)
-        output = run(cmd, timeout=60, pty=not as_daemon, shell=shell)
+        output = sudo(cmd, timeout=15, pty=not as_daemon, shell=shell)
         real_output = remove_unwanted_output(output)
         return real_output
 

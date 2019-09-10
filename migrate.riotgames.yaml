@@ -1,0 +1,98 @@
+api_server_ip: 10.84.29.31
+api_server_port: 8082
+auth_url: http://10.84.29.31:35357/v3
+username: admin
+password: c0ntrail123
+domain_name: Default
+project_name: admin
+image: 59a7abf0-f6d4-4bb5-8a18-b16366aff9cd
+flavor: daf0af13-f7f4-41c2-a9ec-b1e2f360f63e
+use_logical_routers: False
+
+asn: 64512
+threads: 10
+start_port: 5000
+
+networks:
+  webs:
+    mode: application
+    count: 4
+    vms: 1
+    rt_start: 5000100
+    rules:
+      - port: 80
+        src_vn: publics
+      - port: 443
+        src_vn: publics
+      - port: 8082
+        dst_vn: middlewares
+      - port: 8081
+        dst_vn: telemetrys
+    traffic:
+      - mode: server
+        port: 8143
+      - mode: client
+        port: 8081
+        dst_vn: middlewares
+      - mode: client
+        port: 9161
+        dst_vn: dbs
+  middlewares:
+    mode: application
+    count: 4
+    vms: 1
+    rt_start: 5000200
+    rules:
+      - port: 8082
+        src_vn: webs
+      - port: 9161
+        dst_vn: dbs
+      - port: 9041
+        dst_vn: dbs
+      - port: 8081
+        dst_vn: telemetrys
+    traffic:
+      - mode: server
+        port: 8081
+      - mode: client
+        port: 3306
+        dst_vn: dbs
+  dbs:
+    mode: application
+    count: 4
+    vms: 1
+    rt_start: 5000300
+    rules:
+      - port: 9161
+        src_vn: middlewares
+      - port: 9041
+        src_vn: middlewares
+      - port: 8081
+        dst_vn: telemetrys
+  telemetrys:
+    mode: service
+    count: 1
+    vms: 1
+    rt_start: 5000400
+    rules:
+      - port: 8081
+        src_vn: middlewares
+      - port: 8081
+        src_vn: webs
+      - port: 8081
+        src_vn: dbs
+  publics:
+    mode: service
+    count: 1
+    vms: 1
+    rt_start: 5000500
+    rules:
+      - port: 80
+        dst_vn: webs
+      - port: 443
+        dst_vn: webs
+    traffic:
+      - port: 8081
+        dst_vn: telemetrys
+      - port: 8143
+        dst_vn: webs
