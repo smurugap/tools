@@ -21,6 +21,7 @@ TCPSERVER = dir_path+'/tcpechoserver.py'
 TCPCLIENT = dir_path+'/tcpechoclient.py'
 UDPSERVER = dir_path+'/udpechoserver.py'
 UDPCLIENT = dir_path+'/udpechoclient.py'
+MOCKNETCONF = dir_path+'/mock_netconf'
 
 class AgentInspect(object):
     def __init__(self, server):
@@ -41,6 +42,48 @@ class AgentInspect(object):
             for e in intf:  # intf replaces avn[0]
                 if e.tag == 'mdata_ip_addr':
                     return e.text
+
+class BMS(object):
+    def __init__(self, mgmt_ip, username, password, interfaces=None, profile=None):
+        self.mgmt_ip = mgmt_ip
+        self.username = username
+        self.password = password
+        self.interfaces = interfaces
+        self.profile = profile
+        if self.profile:
+            self.interface = self.get_intf_name(profile['port_mac'])
+
+    def run(self, cmd, namespace=None, cwd=None):
+        cmd = 'ip netns exec %s %s'%(namespace, cmd)
+        output = remote_cmd('%s@%s'%(self.username, self.mgmt_ip),
+                            cmd, password=self.password, cwd=cwd)
+        return output
+
+    def create_mock_server(self, index, address, macaddr, gw_ip):
+        count = self.profile.get('pifs') or 10
+        qfx_name = '%s-%s.mock.net'%(name, index)
+        intf_name = '%s-%s'%(self.interface[:6], index)
+        ns_name = '%s-%s'%(name, index)
+        #Create macvlan interface
+        self.run('ip link set dev %s up'%self.interface)
+        self.run('ip link add %s link %s type macvlan mode bridge'%(
+                 self.interface, intf_name))
+        #Create netns and link mvlan interface
+        self.run('ip netns add %s'%ns_name)
+        self.run('ip link set netns %s %s'%(ns_name, intf_name))
+        self.run('ip addr add %s dev %s'%(address, intf_name), ns_name)
+        self.run('ip route add default via %s'%gw_ip, ns_name)
+        self.run('ip link set dev %s up'%intf_name, namespace=ns_name)
+        #Copy mock server and the templates dir
+        dest_dir = '%s@%s:mock_netconf/%s' % (self.username, self.mgmt_ip, ns_name)
+        remote_copy(MOCKNETCONF, dest_dir, dest_password=self.password)
+        #Start the mock server
+        app = 'python netconf_server.py '
+        args = '--tunnel_ip %s --mac_addr %s --hostname %s --interfaces %s'%(
+            address, macaddr, qfx_name, count)
+        cwd = 'mock_netconf/%s'%ns_name
+        cmd = app + args + ' 0<&- &> %s'%('/tmp/%s.log'%ns_name)
+        self.run(cmd, namespace=ns_name, cwd=cwd)
 
 class VM(object):
     def __init__(self, vmi_fqname, client_h):
@@ -151,9 +194,11 @@ class VM(object):
         return self.get_stats(protocol, port, server=server, poll=True)
 
 def remote_cmd(host_string, cmd, password=None, gateway=None,
-               as_daemon=False, gateway_password=None):
+               as_daemon=False, gateway_password=None, cwd=None):
     if as_daemon:
         cmd = 'nohup ' + cmd + ' & '
+    elif cwd:
+        cmd = 'cd %s; %s' % (cwd, cmd)
     (username, host_ip) = host_string.split('@')
     shell = '/bin/sh -l -c'
     with settings(
@@ -220,7 +265,6 @@ def remote_copy(src, dest, src_password=None, src_gw=None, src_gw_password=None,
     else:
         raise AttributeError("Invalid source path - %s" % src)
 
-    import pdb; pdb.set_trace()
     if src_node:
         # Source is remote
         with settings(host_string=src_node, gateway=src_gw,
