@@ -51,39 +51,42 @@ class BMS(object):
         self.interfaces = interfaces
         self.profile = profile
         if self.profile:
-            self.interface = self.get_intf_name(profile['port_mac'])
+            self.interface = profile.get('interface') or self.get_intf_name(profile['port_mac'])
 
-    def run(self, cmd, namespace=None, cwd=None):
-        cmd = 'ip netns exec %s %s'%(namespace, cmd)
+    def run(self, cmd, namespace=None):
+        if namespace:
+            cmd = 'ip netns exec %s %s'%(namespace, cmd)
         output = remote_cmd('%s@%s'%(self.username, self.mgmt_ip),
-                            cmd, password=self.password, cwd=cwd)
+                            cmd, password=self.password)
         return output
 
-    def create_mock_server(self, index, address, macaddr, gw_ip):
+    def create_mock_server(self, qfx_name, index, address, macaddr, gw_ip):
         count = self.profile.get('pifs') or 10
-        qfx_name = '%s-%s.mock.net'%(name, index)
-        intf_name = '%s-%s'%(self.interface[:6], index)
-        ns_name = '%s-%s'%(name, index)
+        intf_name = '%s.%s'%(self.interface[:6], index)
+        ns_name = qfx_name
         #Create macvlan interface
         self.run('ip link set dev %s up'%self.interface)
         self.run('ip link add %s link %s type macvlan mode bridge'%(
-                 self.interface, intf_name))
+                 intf_name, self.interface))
         #Create netns and link mvlan interface
         self.run('ip netns add %s'%ns_name)
+        self.run('mkdir %s'%ns_name)
         self.run('ip link set netns %s %s'%(ns_name, intf_name))
-        self.run('ip addr add %s dev %s'%(address, intf_name), ns_name)
+        self.run('ip link set dev %s up'%intf_name, ns_name)
+        self.run('ip addr add %s/24 dev %s'%(address, intf_name), ns_name)
         self.run('ip route add default via %s'%gw_ip, ns_name)
-        self.run('ip link set dev %s up'%intf_name, namespace=ns_name)
         #Copy mock server and the templates dir
-        dest_dir = '%s@%s:mock_netconf/%s' % (self.username, self.mgmt_ip, ns_name)
+        dest_dir = '%s@%s:%s' % (self.username, self.mgmt_ip, ns_name)
         remote_copy(MOCKNETCONF, dest_dir, dest_password=self.password)
         #Start the mock server
         app = 'python netconf_server.py '
         args = '--tunnel_ip %s --mac_addr %s --hostname %s --interfaces %s'%(
             address, macaddr, qfx_name, count)
-        cwd = 'mock_netconf/%s'%ns_name
-        cmd = app + args + ' 0<&- &> %s'%('/tmp/%s.log'%ns_name)
-        self.run(cmd, namespace=ns_name, cwd=cwd)
+        cmd = 'nohup ' + app + args + ' 0<&- &> %s &'%('/tmp/%s.log'%ns_name)
+        cwd = ns_name+'/'+os.path.basename(MOCKNETCONF)
+        cmd = 'cd %s; %s'%(cwd, cmd)
+        cmd = '/bin/sh -l -c "%s"'%cmd
+        self.run(cmd, namespace=ns_name)
 
 class VM(object):
     def __init__(self, vmi_fqname, client_h):
@@ -194,11 +197,9 @@ class VM(object):
         return self.get_stats(protocol, port, server=server, poll=True)
 
 def remote_cmd(host_string, cmd, password=None, gateway=None,
-               as_daemon=False, gateway_password=None, cwd=None):
+               as_daemon=False, gateway_password=None):
     if as_daemon:
         cmd = 'nohup ' + cmd + ' & '
-    elif cwd:
-        cmd = 'cd %s; %s' % (cwd, cmd)
     (username, host_ip) = host_string.split('@')
     shell = '/bin/sh -l -c'
     with settings(
@@ -208,10 +209,11 @@ def remote_cmd(host_string, cmd, password=None, gateway=None,
             warn_only=True,
             disable_known_hosts=True,
             abort_on_prompts=False):
-      with hide('everything'):
+#      with hide('everything'):
         update_env_passwords(host_string, password, gateway, gateway_password)
         output = sudo(cmd, timeout=15, pty=not as_daemon, shell=shell)
         real_output = remove_unwanted_output(output)
+        print output
         return real_output
 
 def remove_unwanted_output(text):

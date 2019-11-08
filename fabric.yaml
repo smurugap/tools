@@ -1,6 +1,6 @@
-api_server_ip: 10.84.29.31
+api_server_ip: 10.87.69.8
 api_server_port: 8082
-auth_url: http://10.84.29.31:35357/v3
+auth_url: http://10.87.67.44:35357/v3
 username: admin
 password: c0ntrail123
 domain_name: Default
@@ -8,61 +8,27 @@ project_name: admin
 image: 59a7abf0-f6d4-4bb5-8a18-b16366aff9cd
 flavor: daf0af13-f7f4-41c2-a9ec-b1e2f360f63e
 threads: 10
-fabric: scale-fabric1
+fabric: mock
 
-spines:
-  qfx1:
-  qfx2:
-leafs:
-  qfx3:
-  qfx4:
-  qfx5:
-    border: True
-  qfx6:
-    border: True
 mock:
   servers:
     node1:
-      count: 10
+      count: 50
       prefix: MockQfx
-      mgmt_ip: 10.84.7.36
-      pifs: 10
-      port_mac: aa:bb:cc:dd:ee:ff
+      mgmt_ip: 10.87.69.4
+      pifs: 32
+      port_mac: 90:e2:ba:55:86:c8
+      interface: enp4s0f0
   address:
-    start: 192.168.10.20
-    end: 192.168.10.250
-    gw: 192.168.10.254
+    start: 172.16.130.1
+    end: 172.16.130.100
+    gw: 172.16.130.254
   username: root
   password: c0ntrail123
 
 profiles:
   profile1:
-    vpg: 10
+    vpg: 1600
     vmi_per_vpg: 10
-    vn: 5
+    vn: 800
     vlan_start: 10
-
-bms:
-  bms1:
-    mgmt: 1.1.1.1
-    username: root
-    password: c0ntrail123
-    interfaces:
-    - mac: 11:22:33:11:22:33
-      tor: qfx3
-      tor_port: xe-0/0/0
-    - mac: 11:22:33:11:22:34
-      tor: qfx4
-      tor_port: xe-0/0/0
-  bms2:
-    mgmt: 2.2.2.2
-    username: root
-    password: c0ntrail123
-    interfaces:
-    - mac: 22:22:33:11:22:33
-      tor: qfx3
-      tor_port: xe-0/0/1
-    - mac: 22:22:33:11:22:34
-      tor: qfx4
-      tor_port: xe-0/0/1
-

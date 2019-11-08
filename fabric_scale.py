@@ -4,10 +4,6 @@ import struct
 import uuid
 from netaddr import *
 
-from novaclient import client as nova_client
-from keystoneclient import client as ks_client
-from keystoneauth1 import identity
-from keystoneauth1 import session
 from vnc_api.vnc_api import *
 import yaml
 import argparse
@@ -84,7 +80,7 @@ class Scale(object):
                                           mock['password'],
                                           profile=profile)
         for index in range(IPAddress(mock['address']['start']).value,
-                           IPAddress(mock['address']['end']).value)
+                           IPAddress(mock['address']['end']).value):
             self.free_pool.add(index)
 
     def reserve_address(self):
@@ -95,18 +91,22 @@ class Scale(object):
     def get_fqname(self, prefix, index):
         return ['default-domain', self.args.project_name, prefix+'-'+str(index)]
 
+    def get_qfx_name(self, name, index):
+        return '%s-%s.mock.net'%(name, index)
+
     def mock_start(self):
         gw_ip = self.args.mock['address']['gw']
         for name, mock_server in self.mock_servers.items():
-            for index in mock_server['profile']['count']:
-                lo_ip = self.reserve_address()
+            for index in range(mock_server.profile['count']):
+                lo_ip = str(IPAddress(self.reserve_address()))
                 mac_addr = get_random_mac()
-                bms.create_mock_server(index, lo_ip, mac_addr, gw_ip)
+                qfx_name = self.get_qfx_name(name, index)
+                mock_server.create_mock_server(qfx_name, index, lo_ip, mac_addr, gw_ip)
 
     def onboard(self):
+        self.mock_start()
         mock = self.args.mock
         fabric = self.client_h.read_fabric(self.fabric)
-        import pdb; pdb.set_trace()
         for kvp in fabric.get_annotations().get_key_value_pair():
             if kvp.key.lower() == 'user_input':
                 payload = json.loads(kvp.value)
@@ -125,17 +125,16 @@ class Scale(object):
     def get_mocked_device_names(self):
         devices = list()
         for name, mock_server in self.mock_servers.items():
-            for index in mock_server['profile']['count']:
-                devices.append('%s-%s.mock.net'%(name, index))
+            for index in range(mock_server.profile['count']):
+                devices.append(self.get_qfx_name(name, index))
         return devices
 
     def assign_roles(self):
-        import pdb; pdb.set_trace()
         devices = self.get_mocked_device_names()
         roles = list()
         for device in devices:
             fq_name = ['default-global-system-config', device]
-            roles.append({'device_fq_name': device,
+            roles.append({'device_fq_name': fq_name,
                           'physical_role': 'leaf',
                           'routing_bridging_roles': ['ERB-UCAST-Gateway']})
         fq_name = ['default-global-system-config', 'role_assignment_template']
@@ -153,21 +152,21 @@ class Scale(object):
 
     def init_pifs(self):
         mock = self.args.mock
-        for name, profile in mock['servers'].items():
-            for index in mock_server['profile']['count']:
-                device_name = '%s-%s.mock.net'%(name, index)
-                for pif_index in range(profile['pifs']):
+        for name, mock_server in self.mock_servers.items():
+            for index in range(mock_server.profile['count']):
+                device_name = self.get_qfx_name(name, index)
+                for pif_index in range(mock_server.profile['pifs']):
                     pif_name = 'default-global-system-config:'+device_name+':ge-0/0/%s'%pif_index
-                    self.free_pifs.append(pif_name)
+                    self.free_pifs.add(pif_name)
 
     def reserve_pif(self):
         pif = self.free_pifs.pop()
         self.reserved_pifs.add(pif)
         return pif.split(':')
 
-    def get_vn(self, available_vns, max_vmi_per_vn, count):
+    def get_vns(self, available_vns, max_vmi_per_vn, count):
         vns = list()
-        while available_vns and len(vns) <= count:
+        while available_vns and len(vns) < count:
             vn = available_vns.pop()
             self.vns[vn]['count'] += 1
             vns.append(vn)
@@ -178,7 +177,7 @@ class Scale(object):
 
     def create(self):
         self.init_pifs()
-        for name, profile in self.args.profiles:
+        for name, profile in self.args.profiles.items():
             vlan = profile['vlan_start']
             free_vns = list()
             for i in range(profile['vn']):
@@ -192,17 +191,19 @@ class Scale(object):
             vmi_per_vn = ((profile['vmi_per_vpg'] * profile['vpg'])/profile['vn'])
             for i in range(profile['vpg']):
                 pif = self.reserve_pif()
-                vpg_fqname = [self.fabric, '%s_%s'%(pif[1], pif[2])]
-                vpg = self.create_vpg(vpg_fqname, [pif])
-                vns = self.get_vns(free_vns, profile['vmi_per_vpg'])
+                vpg_fqname = ['default-global-system-config', self.fabric,
+                              '%s_%s'%(pif[1], pif[2])]
+                vpg = self.client_h.create_vpg(vpg_fqname, [pif])
+                vns = self.get_vns(free_vns, vmi_per_vn, profile['vmi_per_vpg'])
                 for vn in vns:
                     vn_obj = self.vns[vn]['obj']
-                    fq_name = vn_obj.fq_name[:2] + [vn+'.'+self.vns[vn]['count']]
+                    fq_name = vn_obj.fq_name[:2] + [vn+'.%s'%self.vns[vn]['count']]
                     bms_info = {'vpg': vpg_fqname[-1],
-                                'switch_info': pif[1],
-                                'port_id': pif[2],
-                                'vlan': self.vns[vn]['vlan'],
-                                'fabric': self.fabric}
+                                'interfaces': [{'switch_info': pif[1],
+                                                'port_id': pif[2],
+                                                'vlan': self.vns[vn]['vlan'],
+                                                'fabric': self.fabric}]
+                                }
                     self.client_h.create_port(fq_name, vn_obj, bms_info=bms_info)
 
     def create_one_batch(self):
@@ -211,13 +212,14 @@ class Scale(object):
         vn_fqname = self.get_fqname('test-onebatch', 1)
         uuid = self.client_h.create_vn(vn_fqname)
         vn_obj = self.client_h.read_vn(fq_name=vn_fqname)
-        vpg_fqname = [self.fabric, '%s_%s'%(pif[1], pif[2])]
+        vpg_fqname = ['default-global-system-config', self.fabric,
+                      '%s_%s'%(pif[1], pif[2])]
         vpg = self.client_h.create_vpg(vpg_fqname, [pif])
         bms_info = {'vpg': vpg_fqname[-1],
-                    'switch_info': pif[1],
-                    'port_id': pif[2],
-                    'vlan': 4000,
-                    'fabric': self.fabric}
+                    'interfaces': [{'switch_info': pif[1],
+                                    'fabric': self.fabric,
+                                    'port_id': pif[2], 'vlan': 4000}],
+                    }
         self.client_h.create_port(vn_fqname, vn_obj, bms_info=bms_info)
 
     def delete(self):
@@ -225,16 +227,6 @@ class Scale(object):
 
 class Client(object):
     def __init__ (self, args):
-        auth = identity.v3.Password(auth_url=args.auth_url,
-                                    username=args.username,
-                                    password=args.password,
-                                    user_domain_name=args.domain_name,
-                                    project_domain_name=args.domain_name,
-                                    project_name=args.project_name)
-        sess = session.Session(auth=auth, verify=False)
-        self.keystone = ks_client.Client(version='3', session=sess,
-            auth_url=args.auth_url, insecure=True)
-        self.nova = nova_client.Client('2', session=sess)
         domain_name = 'default-domain' if args.domain_name == 'Default' \
                                        else args.domain_name
         match = re.match(r'(.*?)://(.*?):([\d]+).*$', args.auth_url, re.M|re.I)
@@ -246,14 +238,11 @@ class Client(object):
         self.vnc = VncApi(username=args.username,
                           password=args.password,
                           tenant_name=args.project_name,
-                          domain_name=domain_name,
                           api_server_host=args.api_server_ip,
                           auth_host=auth_host)
-        self.flavor = args.flavor
-        self.image = args.image
 
     def create_vn(self, fq_name, asn=None, rt=None, peer_rt_list=None):
-        mask = 29
+        mask = 27
         cidr = get_random_cidr(mask=mask).split('/')[0]
         vn_name = fq_name[-1]
         vn_obj = VirtualNetwork(vn_name, parent_type='project',
@@ -354,12 +343,13 @@ class Client(object):
             kv_pairs.add_key_value_pair(vnic_kv)
             vpg = bms_info.pop('vpg', None)
             if vpg:
-                vpg_kv = KeyValuePair(key='vpg', vpg)
-                kv_pairs.add_key_value_pair(pg_kv)
+                vpg_kv = KeyValuePair(key='vpg', value=vpg)
+                kv_pairs.add_key_value_pair(vpg_kv)
             device_owner = 'baremetal:None'
-            ll_info = {'local_link_information': bms_info}
+            ll_info = {'local_link_information': bms_info['interfaces']}
             bind_kv = KeyValuePair(key='profile', value=json.dumps(ll_info))
             kv_pairs.add_key_value_pair(bind_kv)
+            port_obj.set_virtual_machine_interface_bindings(kv_pairs)
         if device_owner:
             port_obj.set_virtual_machine_interface_device_owner(device_owner)
         self.vnc.virtual_machine_interface_create(port_obj)
@@ -543,18 +533,6 @@ def main(template, oper, custom_cmd):
         obj.delete()
     elif oper.lower() == 'add':
         obj.create()
-    elif oper.lower() == 'start':
-        obj.start_traffic()
-    elif oper.lower() == 'custom':
-        obj.custom(custom_cmd)
-    elif oper.lower() == 'poll':
-        obj.poll_traffic()
-    elif oper.lower() == 'stop':
-        obj.stop_traffic()
-    elif oper.lower() == 'onboard':
-        obj.onboard()
-    elif oper.lower() == 'start_mock':
-        obj.start_mock()
     elif getattr(obj, oper.lower(), None):
         fn = getattr(obj, oper.lower())
         fn()
