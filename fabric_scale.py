@@ -255,13 +255,19 @@ class Client(object):
                 route_target=['target:%s:%s'%(asn, rt)]))
             vn_obj.set_import_route_target_list(RouteTargetList(
                 route_target=peer_rt_list))
-        vn_id = self.vnc.virtual_network_create(vn_obj)
+        try:
+            vn_id = self.vnc.virtual_network_create(vn_obj)
+        except RefsExistError:
+            vn_id = self.vnc.virtual_network_read(fq_name=fq_name).uuid
         return vn_id
 
     def create_vpg(self, fq_name, pifs=None):
         obj = VirtualPortGroup(fq_name[-1], fq_name=fq_name,
                                parent_type='fabric')
-        uuid = self.vnc.virtual_port_group_create(obj)
+        try:
+            uuid = self.vnc.virtual_port_group_create(obj)
+        except RefsExistError:
+            return self.vnc.virtual_port_group_read(fq_name=fq_name).uuid
         if pifs:
             for pif in pifs:
                 pif_obj = self.vnc.physical_interface_read(fq_name=pif)
@@ -352,7 +358,10 @@ class Client(object):
             port_obj.set_virtual_machine_interface_bindings(kv_pairs)
         if device_owner:
             port_obj.set_virtual_machine_interface_device_owner(device_owner)
-        self.vnc.virtual_machine_interface_create(port_obj)
+        try:
+            self.vnc.virtual_machine_interface_create(port_obj)
+        except RefsExistError:
+            return self.vnc.virtual_machine_interface_read(fq_name=fq_name)
         iip_obj = InstanceIp(name=fq_name[-1])
         iip_obj.add_virtual_network(vn_obj)
         iip_obj.add_virtual_machine_interface(port_obj)
