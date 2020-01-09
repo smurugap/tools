@@ -5,23 +5,25 @@ username: admin
 password: c0ntrail123
 domain_name: Default
 project_name: admin
-image: 59a7abf0-f6d4-4bb5-8a18-b16366aff9cd
-flavor: daf0af13-f7f4-41c2-a9ec-b1e2f360f63e
 threads: 10
-fabric: mock
+fabric: ctest-fabric-26971647
+asn: 90000
+spines:
+  - 1.1.1.249
+  - 1.1.1.251
 
 mock:
-  servers:
-    node1:
-      count: 50
-      prefix: MockQfx
-      mgmt_ip: 10.87.69.4
-      pifs: 32
-      port_mac: 90:e2:ba:55:86:c8
-      interface: enp4s0f0
+  profiles:
+    - prefix: mockLeaf
+      start_index: 0
+      count: 100
+      mgmt_ip: 10.87.67.44
+      pifs: 16
+      port_mac: 90:e2:ba:5b:b0:4c
+      interface: enp129s0f0
   address:
     start: 172.16.130.1
-    end: 172.16.130.100
+    end: 172.16.130.101
     gw: 172.16.130.254
   username: root
   password: c0ntrail123
@@ -31,4 +33,4 @@ profiles:
     vpg: 1600
     vmi_per_vpg: 10
     vn: 800
-    vlan_start: 10
+    vlan_start: 1100

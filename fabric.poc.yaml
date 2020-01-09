@@ -1,0 +1,34 @@
+api_server_ip: 10.87.110.102
+api_server_port: 8082
+auth_url: http://10.87.110.102:35357/v3
+username: admin
+password: c0ntrail123
+domain_name: Default
+project_name: admin
+fabric: "ztp-fab"
+asn: 90000
+spines:
+  - 1.1.1.249
+
+mock:
+  profiles:
+    - prefix: mockLeaf
+      start_index: 0
+      count: 2
+      mgmt_ip: 10.87.70.18
+      pifs: 4
+      port_mac: 90:e2:ba:5a:8c:39
+      interface: enp129s0f1
+  address:
+    start: 192.168.10.100
+    end: 192.168.10.200
+    gw: 192.168.10.254
+  username: root
+  password: c0ntrail123
+
+profiles:
+  profile1:
+    vpg: 5
+    vmi_per_vpg: 2
+    vn: 3
+    vlan_start: 1100

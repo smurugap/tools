@@ -21,7 +21,7 @@ TCPSERVER = dir_path+'/tcpechoserver.py'
 TCPCLIENT = dir_path+'/tcpechoclient.py'
 UDPSERVER = dir_path+'/udpechoserver.py'
 UDPCLIENT = dir_path+'/udpechoclient.py'
-MOCKNETCONF = dir_path+'/mock_netconf'
+SIMULATOR = dir_path+'/simulator'
 
 class AgentInspect(object):
     def __init__(self, server):
@@ -60,8 +60,8 @@ class BMS(object):
                             cmd, password=self.password)
         return output
 
-    def create_mock_server(self, qfx_name, index, address, macaddr, gw_ip):
-        count = self.profile.get('pifs') or 10
+    def create_mock_server(self, qfx_name, index, address, macaddr, gw_ip, asn, peers):
+        pif_count = self.profile.get('pifs') or 10
         intf_name = '%s.%s'%(self.interface[:6], index)
         ns_name = qfx_name
         #Create macvlan interface
@@ -77,16 +77,50 @@ class BMS(object):
         self.run('ip route add default via %s'%gw_ip, ns_name)
         #Copy mock server and the templates dir
         dest_dir = '%s@%s:%s' % (self.username, self.mgmt_ip, ns_name)
-        remote_copy(MOCKNETCONF, dest_dir, dest_password=self.password)
+        remote_copy(SIMULATOR, dest_dir, dest_password=self.password)
         #Start the mock server
-        app = 'python netconf_server.py '
-        args = '--tunnel_ip %s --mac_addr %s --hostname %s --interfaces %s'%(
-            address, macaddr, qfx_name, count)
-        cmd = 'nohup ' + app + args + ' 0<&- &> %s &'%('/tmp/%s.log'%ns_name)
-        cwd = ns_name+'/'+os.path.basename(MOCKNETCONF)
-        cmd = 'cd %s; %s'%(cwd, cmd)
+        app = 'python mockserver.py start '
+        args = '--loopback %s --mac_addr %s --hostname %s --interfaces %s --asn %s --peers %s'%(
+            address, macaddr, qfx_name, pif_count, asn, " ".join(peers))
+        cwd = ns_name+'/'+os.path.basename(SIMULATOR)
+        cmd = 'cd %s; %s'%(cwd, app + args)
         cmd = '/bin/sh -l -c "%s"'%cmd
         self.run(cmd, namespace=ns_name)
+        print 'Started mock server', qfx_name, address
+
+    def delete_mock_server(self, qfx_name):
+        ns_name = qfx_name
+        app = 'python mockserver.py stop '
+        args = '--hostname %s'%qfx_name
+        cwd = ns_name+'/'+os.path.basename(SIMULATOR)
+        cmd = 'cd %s; %s'%(cwd, app + args)
+        cmd = '/bin/sh -l -c "%s"'%cmd
+        self.run(cmd, namespace=ns_name)
+        print 'Stopped mock server', qfx_name
+
+    def advertise_route(self, qfx_name, target, mac, ip, nh, vni):
+        ns_name = qfx_name
+        app = 'python mockserver.py advertise '
+        route = 'rt=%s,mac=%s,ip=%s,vni=%s'%(target, mac, ip, vni)
+        args = '--hostname %s --loopback %s --routes %s'%(
+            qfx_name, nh, route)
+        cwd = ns_name+'/'+os.path.basename(SIMULATOR)
+        cmd = 'cd %s; %s'%(cwd, app + args)
+        cmd = '/bin/sh -l -c "%s"'%cmd
+        self.run(cmd, namespace=ns_name)
+        print 'Advertised route mac:%s ip:%s vni:%s from host %s'%(mac, ip, vni, qfx_name)
+
+    def withdraw_route(self, qfx_name, target, mac, ip, nh, vni):
+        ns_name = qfx_name
+        app = 'python mockserver.py withdraw '
+        route = 'rt=%s,mac=%s,ip=%s,vni=%s'%(target, mac, ip, vni)
+        args = '--hostname %s --loopback %s --routes %s'%(
+            qfx_name, nh, route)
+        cwd = ns_name+'/'+os.path.basename(SIMULATOR)
+        cmd = 'cd %s; %s'%(cwd, app + args)
+        cmd = '/bin/sh -l -c "%s"'%cmd
+        self.run(cmd, namespace=ns_name)
+        print 'Withdraw route mac:%s ip:%s vni:%s from host %s'%(mac, ip, vni, qfx_name)
 
 class VM(object):
     def __init__(self, vmi_fqname, client_h):
@@ -209,11 +243,10 @@ def remote_cmd(host_string, cmd, password=None, gateway=None,
             warn_only=True,
             disable_known_hosts=True,
             abort_on_prompts=False):
-#      with hide('everything'):
+      with hide('everything'):
         update_env_passwords(host_string, password, gateway, gateway_password)
         output = sudo(cmd, timeout=15, pty=not as_daemon, shell=shell)
         real_output = remove_unwanted_output(output)
-        print output
         return real_output
 
 def remove_unwanted_output(text):
@@ -292,12 +325,12 @@ def remote_copy(src, dest, src_password=None, src_gw=None, src_gw_password=None,
 
     if dest_node:
         # Source is either local or remote
+      with hide('everything'):
         with settings(host_string=dest_node, gateway=dest_gw,
                       warn_only=True, disable_known_hosts=True,
                       abort_on_prompts=False):
             update_env_passwords(dest_node, dest_password, dest_gw, dest_gw_password)
             try:
-                print src_path, dest_path
                 put(src_path, dest_path, use_sudo=True)
                 return True
             except NetworkError:

@@ -62,26 +62,36 @@ class Scale(object):
         self.client_h = Client(args)
         self.args = args
         self.fabric = args.fabric
+        self.asn = args.asn
+        self.peers = args.spines
         self.threads = int(getattr(args, 'threads', 1))
         self.vns = dict()
         self.vms = dict()
         self.reserved_pool = set()
-        self.free_pool = set()
+        self.free_pool = list()
         self.reserved_pifs = set()
-        self.free_pifs = set()
+        self.free_pifs = list()
+        self.server_info = dict()
         self.populate_mock_servers()
 
     def populate_mock_servers(self):
         self.mock_servers = dict()
         mock = self.args.mock
-        for name, profile in mock['servers'].items():
-            self.mock_servers[name] = BMS(profile['mgmt_ip'],
+        for profile in mock['profiles']:
+            self.mock_servers[profile['prefix']] = BMS(profile['mgmt_ip'],
                                           mock['username'],
                                           mock['password'],
                                           profile=profile)
         for index in range(IPAddress(mock['address']['start']).value,
                            IPAddress(mock['address']['end']).value):
-            self.free_pool.add(index)
+            self.free_pool.append(index)
+
+        for name, mock_server in self.mock_servers.items():
+            start_index = mock_server.profile['start_index']
+            for index in range(start_index, mock_server.profile['count']+start_index):
+                qfx_name = self.get_qfx_name(name, index)
+                self.server_info[qfx_name] = {'ip': str(IPAddress(self.reserve_address())),
+                                              'bms': mock_server}
 
     def reserve_address(self):
         address = self.free_pool.pop()
@@ -97,11 +107,21 @@ class Scale(object):
     def mock_start(self):
         gw_ip = self.args.mock['address']['gw']
         for name, mock_server in self.mock_servers.items():
-            for index in range(mock_server.profile['count']):
-                lo_ip = str(IPAddress(self.reserve_address()))
+            mock_server.run("pip install netconf jinja2 gevent exabgp")
+            mock_server.run("yum install -y nc")
+            start_index = mock_server.profile['start_index']
+            for index in range(start_index, mock_server.profile['count']+start_index):
                 mac_addr = get_random_mac()
                 qfx_name = self.get_qfx_name(name, index)
-                mock_server.create_mock_server(qfx_name, index, lo_ip, mac_addr, gw_ip)
+                lo_ip = self.server_info[qfx_name]['ip']
+                mock_server.create_mock_server(qfx_name, index, lo_ip, mac_addr, gw_ip, self.asn, self.peers)
+
+    def mock_stop(self):
+        for name, mock_server in self.mock_servers.items():
+            start_index = mock_server.profile['start_index']
+            for index in range(start_index, mock_server.profile['count']+start_index):
+                qfx_name = self.get_qfx_name(name, index)
+                mock_server.delete_mock_server(qfx_name)
 
     def onboard(self):
         self.mock_start()
@@ -117,7 +137,7 @@ class Scale(object):
         payload['device_auth'].append({"username": mock['username'],
                                        "password": mock['password']})
         cidrs = [{"cidr": "%s/32"%IPAddress(addr)} for addr in self.reserved_pool]
-        payload['management_subnets'].extend(cidrs)
+        payload['management_subnets'] = cidrs
         fq_name = ['default-global-system-config',
                    'existing_fabric_onboard_template']
         self.client_h.execute_job(fq_name, payload)
@@ -125,7 +145,8 @@ class Scale(object):
     def get_mocked_device_names(self):
         devices = list()
         for name, mock_server in self.mock_servers.items():
-            for index in range(mock_server.profile['count']):
+            start_index = mock_server.profile['start_index']
+            for index in range(start_index, mock_server.profile['count']+start_index):
                 devices.append(self.get_qfx_name(name, index))
         return devices
 
@@ -153,11 +174,12 @@ class Scale(object):
     def init_pifs(self):
         mock = self.args.mock
         for name, mock_server in self.mock_servers.items():
-            for index in range(mock_server.profile['count']):
+            start_index = mock_server.profile['start_index']
+            for index in range(start_index, mock_server.profile['count']+start_index):
                 device_name = self.get_qfx_name(name, index)
                 for pif_index in range(mock_server.profile['pifs']):
                     pif_name = 'default-global-system-config:'+device_name+':ge-0/0/%s'%pif_index
-                    self.free_pifs.add(pif_name)
+                    self.free_pifs.append(pif_name)
 
     def reserve_pif(self):
         pif = self.free_pifs.pop()
@@ -175,6 +197,44 @@ class Scale(object):
                 available_vns.append(vn)
         return vns
 
+    def delete(self):
+        self.init_pifs()
+        for name, profile in self.args.profiles.items():
+            vlan = profile['vlan_start']
+            free_vns = list()
+            for i in range(profile['vn']):
+                vn_fqname = self.get_fqname(name, i)
+                free_vns.append(vn_fqname[-1])
+                vn_obj = self.client_h.read_vn(fq_name=vn_fqname)
+                rt = self.client_h.get_rt_of_vn(vn_fqname)
+                self.vns[vn_fqname[-1]] = {'count': 0, 'obj': vn_obj, 'rt': rt}
+            vmi_per_vn = ((profile['vmi_per_vpg'] * profile['vpg'])/profile['vn'])
+            for i in range(profile['vpg']):
+                pif = self.reserve_pif()
+                vns = self.get_vns(free_vns, vmi_per_vn, profile['vmi_per_vpg'])
+                for vn in vns:
+                    vn_obj = self.vns[vn]['obj']
+                    target = self.vns[vn]['rt'][0]
+                    vni = vn_obj.virtual_network_network_id
+                    fq_name = ['default-domain', 'admin'] + [vn+'.%s'%self.vns[vn]['count']]
+                    try:
+                        ip, mac = self.client_h.get_vmi_ip_mac(fq_name=fq_name)
+                        nh = self.server_info[pif[1]]['ip']
+                        bms = self.server_info[pif[1]]['bms']
+                        bms.withdraw_route(pif[1], target, mac, ip, nh, vni)
+                        self.client_h.delete_port(fq_name)
+                    except NoIdError:
+                        continue
+                vpg_fqname = ['default-global-system-config', self.fabric,
+                              '%s_%s'%(pif[1], pif[2])]
+                try:
+                    vpg = self.client_h.delete_vpg(vpg_fqname)
+                except NoIdError:
+                    continue
+            for i in range(profile['vn']):
+                vn_fqname = self.get_fqname(name, i)
+                self.client_h.delete_vn(vn_fqname)
+
     def create(self):
         self.init_pifs()
         for name, profile in self.args.profiles.items():
@@ -183,20 +243,27 @@ class Scale(object):
             for i in range(profile['vn']):
                 vn_fqname = self.get_fqname(name, i)
                 uuid = self.client_h.create_vn(vn_fqname)
-                vn_obj = self.client_h.read_vn(fq_name=vn_fqname)
                 self.vns[vn_fqname[-1]] = {'uuid': uuid, 'vlan': vlan,
-                                           'count': 0, 'obj': vn_obj}
+                                           'count': 0, 'fq_name': vn_fqname}
                 vlan = vlan + 1
                 free_vns.append(vn_fqname[-1])
+            for vn, prop in self.vns.items():
+                prop['obj'] = self.client_h.read_vn(fq_name=prop['fq_name'])
+                prop['rt'] = self.client_h.get_rt_of_vn(prop['fq_name'])
             vmi_per_vn = ((profile['vmi_per_vpg'] * profile['vpg'])/profile['vn'])
             for i in range(profile['vpg']):
                 pif = self.reserve_pif()
                 vpg_fqname = ['default-global-system-config', self.fabric,
                               '%s_%s'%(pif[1], pif[2])]
-                vpg = self.client_h.create_vpg(vpg_fqname, [pif])
+                try:
+                    vpg = self.client_h.create_vpg(vpg_fqname, [pif])
+                except:
+                    continue
                 vns = self.get_vns(free_vns, vmi_per_vn, profile['vmi_per_vpg'])
                 for vn in vns:
                     vn_obj = self.vns[vn]['obj']
+                    target = self.vns[vn]['rt'][0]
+                    vni = vn_obj.virtual_network_network_id
                     fq_name = vn_obj.fq_name[:2] + [vn+'.%s'%self.vns[vn]['count']]
                     bms_info = {'vpg': vpg_fqname[-1],
                                 'interfaces': [{'switch_info': pif[1],
@@ -204,7 +271,14 @@ class Scale(object):
                                                 'vlan': self.vns[vn]['vlan'],
                                                 'fabric': self.fabric}]
                                 }
-                    self.client_h.create_port(fq_name, vn_obj, bms_info=bms_info)
+                    try:
+                        self.client_h.create_port(fq_name, vn_obj, bms_info=bms_info)
+                        ip, mac = self.client_h.get_vmi_ip_mac(fq_name=fq_name)
+                        nh = self.server_info[pif[1]]['ip']
+                        bms = self.server_info[pif[1]]['bms']
+                        bms.advertise_route(pif[1], target, mac, ip, nh, vni)
+                    except:
+                        continue
 
     def create_one_batch(self):
         self.init_pifs()
@@ -221,9 +295,6 @@ class Scale(object):
                                     'port_id': pif[2], 'vlan': 4000}],
                     }
         self.client_h.create_port(vn_fqname, vn_obj, bms_info=bms_info)
-
-    def delete(self):
-        pass
 
 class Client(object):
     def __init__ (self, args):
@@ -259,6 +330,7 @@ class Client(object):
             vn_id = self.vnc.virtual_network_create(vn_obj)
         except RefsExistError:
             vn_id = self.vnc.virtual_network_read(fq_name=fq_name).uuid
+        print 'Created VN', fq_name[-1], 'vni -', vn_obj.virtual_network_network_id
         return vn_id
 
     def create_vpg(self, fq_name, pifs=None):
@@ -273,7 +345,12 @@ class Client(object):
                 pif_obj = self.vnc.physical_interface_read(fq_name=pif)
                 obj.add_physical_interface(pif_obj)
             self.vnc.virtual_port_group_update(obj)
+        print 'Created VPG', fq_name[-1]
         return uuid
+
+    def delete_vpg(self, fq_name):
+        self.vnc.virtual_port_group_delete(fq_name=fq_name)
+        print 'Deleted VPG', fq_name[-1]
 
     def read_vn(self, fq_name):
         return self.vnc.virtual_network_read(fq_name=fq_name)
@@ -281,51 +358,9 @@ class Client(object):
     def delete_vn(self, fq_name):
         try:
             self.vnc.virtual_network_delete(fq_name=fq_name)
+            print 'Deleted VN', fq_name[-1]
         except NoIdError:
             pass
-
-    def create_network_policy(self, fq_name, rules):
-        def _get_rule(src_vn, dst_vn, dport):
-            src_addr = AddressType(virtual_network=':'.join(src_vn))
-            dst_addr = AddressType(virtual_network=':'.join(dst_vn))
-            return PolicyRuleType(rule_uuid=str(uuid.uuid4()),
-                                  rule_sequence=SequenceType(major=-1, minor=-1),
-                                  direction="<>", protocol='tcp',
-                                  src_addresses=[src_addr],
-                                  dst_addresses=[dst_addr],
-                                  dst_ports=[PortType(dport, dport)],
-                                  src_ports=[PortType(-1, -1)],
-                                  action_list=ActionListType(apply_service=None,
-                                                          simple_action='pass'))
-        rules_list = list()
-        for rule in rules:
-            rules_list.append(_get_rule(rule['src_vn'], rule['dst_vn'],
-                dport=rule['port']))
-        policy = NetworkPolicy(fq_name[-1], parent_type='project',
-            fq_name=fq_name,
-            network_policy_entries=PolicyEntriesType(rules_list))
-        policy_id = self.vnc.network_policy_create(policy)
-        network_obj = self.vnc.virtual_network_read(fq_name=fq_name)
-        network_obj.add_network_policy(policy,
-            VirtualNetworkPolicyType(sequence=SequenceType(major=0, minor=0)))
-        self.vnc.virtual_network_update(network_obj)
-
-    def delete_network_policy(self, fq_name):
-        try:
-            policy_obj = self.vnc.network_policy_read(fq_name=fq_name)
-            network_obj = self.vnc.virtual_network_read(fq_name=fq_name)
-            network_obj.del_network_policy(policy_obj)
-            self.vnc.virtual_network_update(network_obj)
-        except NoIdError:
-            pass
-        try:
-            self.vnc.network_policy_delete(fq_name=fq_name)
-        except NoIdError:
-            pass
-
-    def _get_obj(self, object_type, fq_name):
-        api = ('self.vnc.' + object_type + '_read').replace('-', '_')
-        return eval(api)(fq_name=fq_name)
 
     def check_and_create_port(self, fq_name, vn_obj, device_owner=None):
         try:
@@ -366,7 +401,7 @@ class Client(object):
         iip_obj.add_virtual_network(vn_obj)
         iip_obj.add_virtual_machine_interface(port_obj)
         self.vnc.instance_ip_create(iip_obj)
-        print port_obj.uuid
+        print 'Created VMI', fq_name[-1]
         return port_obj
 
     def delete_port(self, fq_name):
@@ -376,6 +411,7 @@ class Client(object):
             pass
         try:
             self.vnc.virtual_machine_interface_delete(fq_name=fq_name)
+            print 'Deleted VMI', fq_name[-1]
         except NoIdError:
             pass
 
@@ -398,6 +434,7 @@ class Client(object):
             port_obj = self.check_and_create_port(port_fq_name,
                 vn_obj, device_owner="network:router_interface")
             obj.add_virtual_machine_interface(port_obj)
+        print 'Created LR', fq_name[-1]
         return self.vnc.logical_router_create(obj)
 
     def delete_router(self, fq_name, vns):
@@ -416,45 +453,27 @@ class Client(object):
                 self.delete_port(fq_name=port_fq_name)
             except RefsExistError:
                 continue
+        print 'Deleted LR', fq_name[-1]
 
-    def create_vm(self, vm_name, port_id):
-        nics = [{'port-id': port_id}]
-        response = self.nova.servers.create(name=vm_name,
-                                            flavor=self.flavor,
-                                            image=self.image,
-                                            nics=nics)
+    def get_rt_of_vn(self, fq_name):
+        ri_fqname = fq_name + fq_name[-1:]
+        for i in range(30):
+            ri_obj = self.vnc.routing_instance_read(fq_name=ri_fqname)
+            targets = list()
+            for rt in ri_obj.get_route_target_refs() or []:
+                targets.extend(rt['to'])
+            if not targets:
+                time.sleep(1)
+                continue
+            return targets
 
-    def delete_vm(self, vmi_fqname):
-        try:
-            vm_id = self.get_vm_id(vmi_fqname)
-            if vm_id:
-                self.nova.servers.delete(vm_id)
-            for i in range(10):
-                try:
-                    self.delete_port(vmi_fqname)
-                    break
-                except RefsExistError:
-                    time.sleep(2)
-        except NoIdError:
-            pass
-
-    def get_vm_by_id(self, vm_id):
-        return self.nova.servers.get(vm_id)
-
-    def get_vmi_ip(self, **kwargs):
+    def get_vmi_ip_mac(self, **kwargs):
         vmi_obj = self.read_port(**kwargs)
+        mac = vmi_obj.get_virtual_machine_interface_mac_addresses().mac_address[0]
         for iip in vmi_obj.get_instance_ip_back_refs() or []:
             iip_obj = self.vnc.instance_ip_read(id=iip['uuid'])
-            return iip_obj.instance_ip_address
-
-    def get_vm_id(self, vmi_fqname):
-        vmi_obj = self.read_port(fq_name=vmi_fqname)
-        for ref in vmi_obj.get_virtual_machine_refs() or []:
-            return ref['uuid']
-
-    def get_vm_node(self, vm_id):
-        vm_obj = self.get_vm_by_id(vm_id)
-        return vm_obj.__dict__['OS-EXT-SRV-ATTR:hypervisor_hostname']
+            return iip_obj.instance_ip_address, mac
+        return None, mac
 
     def read_fabric(self, name):
         fq_name = ['default-global-system-config', name]
